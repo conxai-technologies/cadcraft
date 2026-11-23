@@ -21,19 +21,28 @@ pub struct Bridge {
     inner: Rc<Inner>,
 }
 
+/// The framing page and our shared origin, or `None` when CADCraft is not framed or the parent is
+/// on another origin (reading a cross-origin parent's location throws, which is the check).
+fn same_origin_parent() -> Option<(web_sys::Window, String)> {
+    let window = web_sys::window()?;
+    let parent = window.parent().ok().flatten()?;
+    if js_sys::Object::is(&parent, &window) {
+        return None;
+    }
+    let origin = window.location().origin().ok()?;
+    (parent.location().origin().ok()? == origin).then_some((parent, origin))
+}
+
+/// True when a page on our own origin frames CADCraft: the only place embed mode runs.
+pub fn framed_by_same_origin() -> bool {
+    same_origin_parent().is_some()
+}
+
 impl Bridge {
-    /// The bridge to the framing page, or `None` when CADCraft is not framed or the parent is on
-    /// another origin (reading a cross-origin parent's location throws, which is the check).
+    /// The bridge to the framing page; `None` unless [`framed_by_same_origin`].
     pub fn connect(ctx: &egui::Context) -> Option<Bridge> {
         let window = web_sys::window()?;
-        let parent = window.parent().ok().flatten()?;
-        if js_sys::Object::is(&parent, &window) {
-            return None;
-        }
-        let origin = window.location().origin().ok()?;
-        if parent.location().origin().ok()? != origin {
-            return None;
-        }
+        let (parent, origin) = same_origin_parent()?;
         let inner = Rc::new(Inner { parent, origin, queue: RefCell::new(Vec::new()) });
         let listener = {
             let inner = inner.clone();

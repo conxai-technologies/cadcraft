@@ -8,6 +8,8 @@
 //! same-origin parent page sends the drawing to open and stores what CADCraft saves instead
 //! (`host.rs`); a page can also host CADCraft in its own document (no iframe) with
 //! `data-host="page"` on the canvas, talking over DOM `CustomEvent`s on it (`host.rs`).
+//! With `?embed=1` inside a same-origin `<iframe>` it runs as a restricted viewer that the host
+//! page drives over `cadcraft.<name>` messages (`embed`, `DOCNOSTIC.md`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 #[cfg(target_arch = "wasm32")]
@@ -36,7 +38,14 @@ mod web {
     /// `prefers-reduced-motion` (it stays
     /// live, so View ▸ Accessibility ▸ Animation Effects ▸ Use System Setting follows a change),
     /// and the document title last written to the page.
-    struct Shell(CadApp, crate::upload::Inbox, Option<crate::host::Bridge>, Option<web_sys::MediaQueryList>, Option<String>);
+    struct Shell(CadApp, crate::upload::Inbox, Option<crate::host::Bridge>, Option<web_sys::MediaQueryList>, Option<String>, Option<Embed>);
+
+    /// Embed mode (`?embed=1` inside a same-origin frame): the channel to the host page and
+    /// what it was last told.
+    struct Embed {
+        bridge: crate::embed::bridge::Bridge,
+        glue: crate::embed::glue::Glue,
+    }
 
     impl eframe::App for Shell {
         /// Runs one frame: takes in files dropped on or picked for the page, drains the background
@@ -48,7 +57,22 @@ mod web {
             // input and are read from `ui` only.
             self.1.drain(&mut self.0);
             self.0.system_animations = self.3.as_ref().map(|reduced| !reduced.matches());
+            if let Some(embed) = &mut self.5 {
+                // The host page's bar carries the tools; a shortcut may have switched a part of
+                // the editor's own chrome back on.
+                crate::embed::glue::restrict_ui(&mut self.0.ui);
+                for incoming in embed.bridge.take() {
+                    for reply in embed.glue.apply(&mut self.0, incoming) {
+                        embed.bridge.post(&reply);
+                    }
+                }
+            }
             self.0.logic(ctx);
+            if let Some(embed) = &mut self.5 {
+                for event in embed.glue.events(&self.0) {
+                    embed.bridge.post(&event);
+                }
+            }
             let drawing = self.0.session.state().ok();
             crate::push_title(&mut self.4, drawing.map(|d| d.title.as_str()), drawing.is_some_and(|d| d.is_dirty()), set_page_title);
             // The crate suppresses duplicates, so reporting after every logic callback
@@ -64,6 +88,10 @@ mod web {
         }
         /// Preferences and validated panel placement survive reloads; egui memory is not kept.
         fn save(&mut self, storage: &mut dyn eframe::Storage) {
+            // Embedded, the host page decides the layout on every start: nothing is kept.
+            if self.5.is_some() {
+                return;
+            }
             storage.set_string(cadcraft_ui_egui::options::PROFILE_KEY, self.0.profile_json());
             storage.set_string(cadcraft_ui_egui::PREFS_KEY, self.0.prefs_json());
             match crate::panel_layout::save(&self.0.ui) {
@@ -140,12 +168,17 @@ mod web {
         // `CustomEvent`s on the canvas (`host`). With neither, there is no file system here:
         // saved files reach the user as browser downloads; an unframed `?host=parent` stays
         // that normal app.
-        let bridge = crate::host::Bridge::connect(&canvas);
+        // `?embed=1` inside a same-origin frame (DocNostic): a restricted viewer the host page
+        // drives over its own messages (`embed`). It takes the place of the host modes above.
+        let embedded = crate::embed::protocol::embed_requested(&query()) && crate::embed::bridge::framed_by_same_origin();
+        let bridge = if embedded { None } else { crate::host::Bridge::connect(&canvas) };
         match &bridge {
             Some(bridge) => {
                 bridge.install();
                 cadcraft_engine::cmd::file::set_deliver(crate::host::deliver);
             }
+            // The upload is the ground truth: what the viewer would save or export goes nowhere.
+            None if embedded => cadcraft_engine::cmd::file::set_deliver(|_, _, _| Ok(())),
             None => cadcraft_engine::cmd::file::set_deliver(crate::download::download),
         }
         let app_bridge = bridge.clone();
@@ -164,17 +197,24 @@ mod web {
                     Box::new(move |cc| {
                         // Embedded, the host sends the drawing: start on the Start tab, not Drawing1.
                         let session = if app_bridge.is_some() { Session::empty() } else { Session::new() };
-                        let control = crate::api::install(cc.egui_ctx.clone());
-                        let mut app = CadApp::new(session, services()).with_control(control);
+                        // Embedded, no `window.cadcraft`: the host page reaches the app only
+                        // through the embed messages.
+                        let mut app = if embedded {
+                            CadApp::new(session, services())
+                        } else {
+                            CadApp::new(session, services()).with_control(crate::api::install(cc.egui_ctx.clone()))
+                        };
                         app.system_languages =
                             web_sys::window().map(|w| w.navigator().languages().iter().filter_map(|v| v.as_string()).collect()).unwrap_or_default();
-                        if let Some(profile) = cc.storage.and_then(|s| s.get_string(cadcraft_ui_egui::options::PROFILE_KEY)) {
+                        // Embedded, stored preferences and layouts are not read (or written).
+                        let storage = cc.storage.filter(|_| !embedded);
+                        if let Some(profile) = storage.and_then(|s| s.get_string(cadcraft_ui_egui::options::PROFILE_KEY)) {
                             app.load_profile(&profile);
                         }
-                        if let Some(prefs) = cc.storage.and_then(|s| s.get_string(cadcraft_ui_egui::PREFS_KEY)) {
+                        if let Some(prefs) = storage.and_then(|s| s.get_string(cadcraft_ui_egui::PREFS_KEY)) {
                             app.load_prefs(&prefs);
                         }
-                        if let Some(layout) = cc.storage.and_then(|s| s.get_string(crate::panel_layout::KEY))
+                        if let Some(layout) = storage.and_then(|s| s.get_string(crate::panel_layout::KEY))
                             && let Err(error) = crate::panel_layout::restore(&mut app.ui, &layout)
                         {
                             log::warn!("panel layout was not restored: {error}");
@@ -203,7 +243,14 @@ mod web {
                             bridge.post_ready();
                         });
                         let reduced_motion = web_sys::window().and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten());
-                        Ok(Box::new(Shell(app, inbox, host, reduced_motion, None)))
+                        let embed = if embedded { crate::embed::bridge::Bridge::connect(&cc.egui_ctx) } else { None }.map(|bridge| {
+                            let mut glue = crate::embed::glue::Glue::new();
+                            glue.start(&mut app);
+                            crate::embed::glue::restrict_ui(&mut app.ui);
+                            bridge.post(&crate::embed::protocol::ViewerMessage::Ready { version: env!("CARGO_PKG_VERSION").to_string() });
+                            Embed { bridge, glue }
+                        });
+                        Ok(Box::new(Shell(app, inbox, host, reduced_motion, None, embed)))
                     }),
                 )
                 .await;

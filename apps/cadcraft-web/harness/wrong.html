@@ -1,16 +1,17 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>CADCraft embed harness: wrong origin</title>
-<p>The inner page is sandboxed without <code>allow-same-origin</code>, so its origin is opaque. It frames the viewer with
-<code>?embed=1</code> and posts <code>cadcraft.zoomExtents</code> every second. The viewer must show the normal app
-(no bridge) and must not react or reply.</p>
-<iframe sandbox="allow-scripts" style="width:100%;height:80vh;border:1px solid #ccc" srcdoc='
-  <body style="margin:0">
-  <iframe id="viewer" style="width:100%;height:70vh;border:0"></iframe>
-  <pre id="log">replies: none</pre>
-  <script>
-    const viewer = document.getElementById("viewer");
-    viewer.src = new URL("../index.html?embed=1", document.referrer || parent.location.href.replace(/[^/]*$/, "")).href;
-    addEventListener("message", e => { document.getElementById("log").textContent = "REPLY RECEIVED: " + JSON.stringify(e.data); });
-    setInterval(() => viewer.contentWindow.postMessage({type: "cadcraft.zoomExtents"}, "*"), 1000);
-  </script>'></iframe>
+<title>CADCraft embed harness: another origin</title>
+<p>This page frames the viewer with <code>?embed=1</code> from another origin (<code>localhost</code> and
+<code>127.0.0.1</code> are different origins) and posts <code>cadcraft.zoomBy</code> every second.
+Expected: the normal app (menus, toolbar) and "messages received: none".</p>
+<iframe id="viewer" style="width:100%;height:75vh;border:1px solid #ccc"></iframe>
+<pre id="log">messages received: none</pre>
+<script>
+  const other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const viewer = document.getElementById('viewer');
+  viewer.src = `${location.protocol}//${other}:${location.port}/index.html?embed=1`;
+  addEventListener('message', event => {
+    document.getElementById('log').textContent = `MESSAGE RECEIVED from ${event.origin}: ${JSON.stringify(event.data)}`;
+  });
+  setInterval(() => viewer.contentWindow.postMessage({type: 'cadcraft.zoomBy', factor: 4}, '*'), 1000);
+</script>
