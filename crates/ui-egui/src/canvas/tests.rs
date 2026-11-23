@@ -230,3 +230,12 @@ fn dynamic_input_distance_follows_the_drawing_units() {
     let text = painted_text(&mut app, &ctx, at);
     assert!(text.contains(&format!("   {}  <", arch(c.len()))), "no {} in:\n{text}", arch(c.len()));
 }
+
+#[test]
+fn the_hand_pointer_drags_with_the_primary_button_and_the_middle_button_always_does() {
+    assert!(super::pan_drag(false, true, false));
+    assert!(super::pan_drag(true, true, false));
+    assert!(super::pan_drag(true, false, true));
+    assert!(!super::pan_drag(false, false, true));
+    assert!(!super::pan_drag(true, false, false));
+}

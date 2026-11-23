@@ -226,12 +226,17 @@ impl Glue {
                 return Vec::new();
             }
             HostMessage::Command { id: EmbedCommand::Pan, request_id } => {
-                app.start("pan");
+                // The hand pointer, not the PAN command: that one asks for two points.
+                if app.session.running.is_some() {
+                    app.session.cancel();
+                }
+                app.canvas.hand_pan = true;
                 return vec![ViewerMessage::CommandDone { request_id: request_id.clone(), ok: true, handles: Vec::new(), error: None }];
             }
             HostMessage::Command { id: EmbedCommand::Select, request_id } => {
-                // Leaves a running command (pan). With none running, cancel would clear the
-                // selection, which is not what switching back to the pointer means.
+                app.canvas.hand_pan = false;
+                // With no command running, cancel would clear the selection, which is not what
+                // switching back to the pointer means.
                 if app.session.running.is_some() {
                     app.session.cancel();
                 }
@@ -537,6 +542,18 @@ mod tests {
         let done = glue.apply(&mut app, message(HostMessage::Command { id: EmbedCommand::Select, request_id: "s".into() }));
         assert!(matches!(&done[..], [ViewerMessage::CommandDone { ok: true, .. }]));
         assert_eq!(app.session.selection().len(), 1);
+    }
+
+    #[test]
+    fn the_pan_pointer_drags_the_view_and_the_select_pointer_picks_again() {
+        let (mut app, mut glue) = sample_app();
+        let done = glue.apply(&mut app, message(HostMessage::Command { id: EmbedCommand::Pan, request_id: "p".into() }));
+        assert!(matches!(&done[..], [ViewerMessage::CommandDone { ok: true, .. }]));
+        // No point prompts: the hand drags the view for as long as it is the pointer.
+        assert!(app.canvas.hand_pan);
+        assert!(app.session.running.is_none());
+        glue.apply(&mut app, message(HostMessage::Command { id: EmbedCommand::Select, request_id: "s".into() }));
+        assert!(!app.canvas.hand_pan);
     }
 
     #[test]

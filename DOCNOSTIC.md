@@ -104,7 +104,7 @@ Host page to viewer:
 | `cadcraft.zoomBy` | `factor` (> 0; above 1 zooms in) | Zoom about the view centre |
 | `cadcraft.zoomTo` | `bounds` or `handles` | Fit a box or entities. Unknown handles are skipped |
 | `cadcraft.select` | `handles` (`[]` clears) | Set the selection. Unknown handles are skipped |
-| `cadcraft.command` | `id` (`explode`, `group`, `ungroup`, `pan`, `select`), `requestId` | Run on the selection, or switch the pointer |
+| `cadcraft.command` | `id` (`explode`, `group`, `ungroup`, `pan`, `select`), `requestId` | Run on the selection, or switch the pointer: with `pan` the primary button drags the view until `select`. The middle button drags it and the wheel zooms with either pointer |
 | `cadcraft.panel` | `name` (`layers`, `properties`), `open` | Show or hide a palette |
 | `cadcraft.highlight` | `boxes [{bounds, color?}]` (`#rrggbb`, default `#ff9f1a`; at most 2000, more rejects the message; `[]` clears), `zoom?` (bool) | Paint boxes over the drawing; `zoom: true` also fits the view to them with a margin (a line or a point gets one too) |
 
