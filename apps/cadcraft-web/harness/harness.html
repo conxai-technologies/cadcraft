@@ -1,0 +1,67 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CADCraft embed harness</title>
+<style>
+  body { margin: 0; font: 13px system-ui, sans-serif; display: grid; grid-template-columns: 1fr 360px; height: 100vh; }
+  iframe { width: 100%; height: 100%; border: 0; }
+  aside { display: flex; flex-direction: column; border-left: 1px solid #ccc; min-width: 0; }
+  .tools { padding: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+  #handles { width: 100%; box-sizing: border-box; }
+  #log { flex: 1; overflow: auto; margin: 0; padding: 8px; background: #111; color: #cfc; font: 11px ui-monospace, monospace; white-space: pre-wrap; }
+</style>
+<iframe id="viewer" src="../index.html?embed=1" title="CADCraft"></iframe>
+<aside>
+  <div class="tools">
+    <input type="file" id="file" accept=".dxf">
+    <button data-send='{"type":"cadcraft.zoomExtents"}'>Extents</button>
+    <button data-send='{"type":"cadcraft.zoomBy","factor":1.25}'>Zoom in</button>
+    <button data-send='{"type":"cadcraft.zoomBy","factor":0.8}'>Zoom out</button>
+    <input id="handles" placeholder="handles, comma separated (e.g. 1B7,2C)">
+    <button id="select">Select</button>
+    <button id="zoomTo">Zoom to</button>
+    <button data-command="explode">Explode</button>
+    <button data-command="group">Group</button>
+    <button data-command="ungroup">Ungroup</button>
+    <button data-command="pan">Pan</button>
+    <button data-command="select">Select mode</button>
+    <button data-send='{"type":"cadcraft.panel","name":"layers","open":true}'>Layers on</button>
+    <button data-send='{"type":"cadcraft.panel","name":"layers","open":false}'>Layers off</button>
+    <button data-send='{"type":"cadcraft.panel","name":"properties","open":true}'>Properties on</button>
+    <button data-send='{"type":"cadcraft.panel","name":"properties","open":false}'>Properties off</button>
+    <button data-send='{"type":"cadcraft.theme","mode":"light","background":"#ffffff"}'>Light</button>
+    <button data-send='{"type":"cadcraft.theme","mode":"dark","background":"#101418"}'>Dark</button>
+    <button data-send='{"type":"cadcraft.select","handles":["zz"]}'>Malformed</button>
+  </div>
+  <pre id="log"></pre>
+</aside>
+<script>
+  const viewer = document.getElementById('viewer');
+  const log = document.getElementById('log');
+  let request = 0;
+  const write = (direction, message) => {
+    const shown = message.bytes ? {...message, bytes: `<${message.bytes.byteLength} bytes>`} : message;
+    log.textContent += `${direction} ${JSON.stringify(shown)}\n`;
+    log.scrollTop = log.scrollHeight;
+  };
+  const send = (message, transfer) => {
+    write('>', message);
+    viewer.contentWindow.postMessage(message, location.origin, transfer || []);
+  };
+  const handles = () => document.getElementById('handles').value.split(',').map(h => h.trim()).filter(Boolean);
+  window.addEventListener('message', event => {
+    if (event.source !== viewer.contentWindow || event.origin !== location.origin) return;
+    write('<', event.data);
+  });
+  document.querySelectorAll('[data-send]').forEach(button =>
+    button.addEventListener('click', () => send(JSON.parse(button.dataset.send))));
+  document.querySelectorAll('[data-command]').forEach(button =>
+    button.addEventListener('click', () => send({type: 'cadcraft.command', id: button.dataset.command, requestId: `r${++request}`})));
+  document.getElementById('select').addEventListener('click', () => send({type: 'cadcraft.select', handles: handles()}));
+  document.getElementById('zoomTo').addEventListener('click', () => send({type: 'cadcraft.zoomTo', handles: handles()}));
+  document.getElementById('file').addEventListener('change', async event => {
+    const file = event.target.files[0];
+    if (!file) return;
+    const bytes = await file.arrayBuffer();
+    send({type: 'cadcraft.open', name: file.name, bytes}, [bytes]);
+  });
+</script>
