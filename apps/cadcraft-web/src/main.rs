@@ -14,6 +14,8 @@
 mod api;
 #[cfg(target_arch = "wasm32")]
 pub mod download;
+#[cfg(any(target_arch = "wasm32", test))]
+mod embed;
 #[cfg(target_arch = "wasm32")]
 mod host;
 
