@@ -25,8 +25,13 @@ Base: upstream tag `v0.20.1`. Nothing under `crates/` is changed.
 - The editor's menu bar, toolbar, file tabs, command line, Tool Sets and ViewCube are off. The
   status bar stays. Layers and Properties start closed; the host opens them.
 - One drawing at a time: `cadcraft.open` replaces the open drawing.
-- Saves and exports go nowhere. `window.cadcraft` is not installed. Stored preferences and panel
-  layouts are neither read nor written.
+- Saving and exporting answer "Saving is not available in this viewer"; nothing is written.
+  `window.cadcraft` is not installed. Stored preferences and panel layouts are neither read nor
+  written.
+- Only the host page opens drawings: dropped files and the file picker are off. A drawing over
+  the app's size limit is refused by its length, before it is copied.
+- A drawing saved with a view opens on that view; otherwise it is fitted. A zoom the host sends
+  after `cadcraft.open` wins over that fit.
 - Messages are taken only from `window.parent` at our own origin, and replies go only there.
   Malformed or unknown messages are dropped without a reply.
 - Not yet: blocking commands the user types or triggers by shortcut (needs a small engine hook),
@@ -55,7 +60,7 @@ Viewer to host page:
 | `type` | Fields | When |
 |---|---|---|
 | `cadcraft.ready` | `version`, `capabilities` | The viewer is listening |
-| `cadcraft.opened` | `name`, `extents`, `units`, `layers[] {name, on}` | A drawing opened |
+| `cadcraft.opened` | `name`, `extents`, `units`, `layers[] {name, on}`, `savedView` | A drawing opened. `savedView`: it opened on the view it was saved with (send `cadcraft.zoomExtents` to fit it instead) |
 | `cadcraft.error` | `message`, `fatal` | A drawing could not be opened |
 | `cadcraft.selection` | `handles`, `bounds`, `count`, `source` (`user`, `host`) | The selection changed |
 | `cadcraft.commandDone` | `requestId`, `ok`, `handles`, `error?` | A `cadcraft.command` finished; explode returns the new handles |

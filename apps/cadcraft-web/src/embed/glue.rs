@@ -83,7 +83,7 @@ fn units(code: i64) -> &'static str {
     }
 }
 
-fn opened(app: &CadApp, name: &str) -> ViewerMessage {
+fn opened(app: &CadApp, name: &str, saved_view: bool) -> ViewerMessage {
     let (extents, units, layers) = match app.session.state() {
         Ok(state) => (
             finite(&state.doc.extents(&state.space)),
@@ -92,22 +92,20 @@ fn opened(app: &CadApp, name: &str) -> ViewerMessage {
         ),
         Err(_) => (None, units(0), Vec::new()),
     };
-    ViewerMessage::Opened { name: name.to_string(), extents, units: units.to_string(), layers }
+    ViewerMessage::Opened { name: name.to_string(), extents, units: units.to_string(), layers, saved_view }
 }
 
-fn tool_state(app: &CadApp) -> ToolState {
-    let selection = app.session.selection();
+/// The part of the tool state that depends on the selection and the drawing. One pass over the
+/// groups' members, so a large selection in a drawing with many groups stays cheap.
+fn selection_tools(app: &CadApp, selection: &[Handle]) -> (bool, bool, bool) {
     let drawing = app.session.doc().ok();
     let is_insert = |h: &Handle| drawing.and_then(|d| d.entity(*h)).is_some_and(|e| matches!(e.kind, cadcraft_doc::EntityKind::Insert(_)));
-    let grouped = |h: &Handle| drawing.is_some_and(|d| d.groups.iter().any(|g| g.members.contains(h)));
-    let layout = &app.ui.docking.layout;
-    ToolState {
-        can_explode: selection.iter().any(is_insert),
-        can_group: selection.len() >= 2,
-        can_ungroup: selection.iter().any(grouped),
-        layers_open: layout.contains(&Panel::Layers),
-        properties_open: layout.contains(&Panel::Properties),
-    }
+    let can_ungroup = !selection.is_empty()
+        && drawing.is_some_and(|d| {
+            let grouped: std::collections::HashSet<Handle> = d.groups.iter().flat_map(|g| g.members.iter().copied()).collect();
+            selection.iter().any(|h| grouped.contains(h))
+        });
+    (selection.iter().any(is_insert), selection.len() >= 2, can_ungroup)
 }
 
 fn error(message: impl Into<String>) -> Vec<ViewerMessage> {
@@ -119,6 +117,9 @@ fn error(message: impl Into<String>) -> Vec<ViewerMessage> {
 pub struct Glue {
     selection: Option<Vec<Handle>>,
     state: Option<ToolState>,
+    /// The document and revision the selection-dependent tool state was worked out for.
+    examined: Option<(u64, u64)>,
+    selection_tools: (bool, bool, bool),
     /// The next selection change was asked for by the host page.
     host_selected: bool,
 }
@@ -146,38 +147,46 @@ impl Glue {
         }
     }
 
-    fn open(&mut self, app: &mut CadApp, name: &str, bytes: Option<Vec<u8>>) -> Vec<ViewerMessage> {
+    fn open(&mut self, app: &mut CadApp, name: &str, bytes: Option<Vec<u8>>, refused: Option<String>) -> Vec<ViewerMessage> {
+        if let Some(reason) = refused {
+            return error(reason);
+        }
         let Some(bytes) = bytes else { return error(format!("Open: {name} came without its bytes")) };
         if let Some(e) = CadApp::open_size_error(name, bytes.len() as u64) {
             return error(e);
         }
         let before = app.session.docs.len();
         let data = cadcraft_engine::cmd::file::base64_encode(&bytes);
-        if let Err(e) = app.run("open", json!({"data": data, "name": name})) {
-            return error(e);
-        }
+        // The engine decodes its own copy: ours is not kept beside it while the drawing is read.
+        drop(bytes);
+        let result = match app.run("open", json!({"data": data, "name": name})) {
+            Ok(result) => result,
+            Err(e) => return error(e),
+        };
         // One drawing at a time: the ones that were open go, oldest first, which leaves the new
         // one (opened last) as the only document.
         for _ in 0..before {
-            if let Err(e) = app.run("close", json!({"index": 0, "discard": true})) {
+            if let Err(e) = app.run("close", json!({"index": 0})) {
                 log::warn!("embed: could not close the previous drawing: {e}");
                 break;
             }
         }
         app.ui.start_tab = false;
-        app.canvas.zoom_pending = true;
+        // A drawing that was saved with a view opens on it; any other is fitted to the window.
+        let saved_view = result.get("saved_view").and_then(Value::as_bool).unwrap_or(false);
+        app.canvas.zoom_pending = !saved_view;
         // The new drawing starts with nothing selected; the host learns that from `opened`.
         self.selection = Some(Vec::new());
         self.host_selected = false;
-        vec![opened(app, name)]
+        vec![opened(app, name, saved_view)]
     }
 
     /// Does what one host message asks. The replies are the messages that answer it directly
     /// (an error, a command's result, `opened`); changes it causes are reported by [`Self::events`].
     pub fn apply(&mut self, app: &mut CadApp, incoming: Incoming) -> Vec<ViewerMessage> {
-        let Incoming { message, bytes } = incoming;
+        let Incoming { message, bytes, refused } = incoming;
         match &message {
-            HostMessage::Open { name } => return self.open(app, name, bytes),
+            HostMessage::Open { name } => return self.open(app, name, bytes, refused),
             HostMessage::Theme { dark, background, selection } => {
                 app.ui.theme = if *dark { cadcraft_ui_egui::theme::ThemePref::Dark } else { cadcraft_ui_egui::theme::ThemePref::Light };
                 let colour = |c: &[u8; 3]| egui::Color32::from_rgb(c[0], c[1], c[2]);
@@ -194,7 +203,11 @@ impl Glue {
                 return vec![ViewerMessage::CommandDone { request_id: request_id.clone(), ok: true, handles: Vec::new(), error: None }];
             }
             HostMessage::Command { id: EmbedCommand::Select, request_id } => {
-                app.session.cancel();
+                // Leaves a running command (pan). With none running, cancel would clear the
+                // selection, which is not what switching back to the pointer means.
+                if app.session.running.is_some() {
+                    app.session.cancel();
+                }
                 return vec![ViewerMessage::CommandDone { request_id: request_id.clone(), ok: true, handles: Vec::new(), error: None }];
             }
             _ => {}
@@ -212,6 +225,10 @@ impl Glue {
             other => other,
         };
         let Some((id, params)) = command_for(&message) else { return Vec::new() };
+        // A view the host asks for wins over the fit that is still pending from an open.
+        if matches!(message, HostMessage::ZoomExtents | HostMessage::ZoomBy { .. } | HostMessage::ZoomTo(_)) {
+            app.canvas.zoom_pending = false;
+        }
         // The entity commands act on the selection; with none they would do nothing and say so
         // only on the hidden command line.
         if let HostMessage::Command { request_id, .. } = &message
@@ -246,20 +263,35 @@ impl Glue {
     /// Called once per frame: the selection and tool state, each reported when it changed.
     pub fn events(&mut self, app: &CadApp) -> Vec<ViewerMessage> {
         let mut out = Vec::new();
-        let selection = app.session.selection();
-        if self.selection.as_ref() != Some(&selection) {
+        let document = app.session.state().ok();
+        let selection: &[Handle] = document.map_or(&[], |d| d.selection.as_slice());
+        let selection_changed = self.selection.as_deref() != Some(selection);
+        if selection_changed {
             // The first frame only records the starting point: nothing changed yet.
             if self.selection.is_some() {
                 out.push(ViewerMessage::Selection {
                     handles: selection.iter().map(|h| h.hex()).collect(),
-                    bounds: bounds_of(app, &selection),
+                    bounds: bounds_of(app, selection),
                     from_host: self.host_selected,
                 });
             }
-            self.selection = Some(selection);
+            self.selection = Some(selection.to_vec());
         }
         self.host_selected = false;
-        let state = tool_state(app);
+        // The drawing is only examined again when it or the selection changed, not every frame.
+        let examined = document.map(|d| (d.uid, d.revision));
+        if selection_changed || self.examined != examined {
+            self.selection_tools = selection_tools(app, selection);
+            self.examined = examined;
+        }
+        let layout = &app.ui.docking.layout;
+        let state = ToolState {
+            can_explode: self.selection_tools.0,
+            can_group: self.selection_tools.1,
+            can_ungroup: self.selection_tools.2,
+            layers_open: layout.contains(&Panel::Layers),
+            properties_open: layout.contains(&Panel::Properties),
+        };
         if self.state.as_ref() != Some(&state) {
             out.push(ViewerMessage::State(state.clone()));
             self.state = Some(state);
@@ -301,7 +333,17 @@ mod tests {
     }
 
     fn message(message: HostMessage) -> Incoming {
-        Incoming { message, bytes: None }
+        Incoming { message, bytes: None, refused: None }
+    }
+
+    /// The sample drawing as DXF bytes: a drawing the app wrote itself is the simplest valid one.
+    fn sample_dxf(app: &mut CadApp) -> Vec<u8> {
+        let written = app.run("document.bytes", json!({"name": "plan.dxf"})).expect("the sample is written as DXF");
+        cadcraft_engine::cmd::file::base64_decode(written["data"].as_str().expect("data")).expect("base64")
+    }
+
+    fn open(name: &str, bytes: Vec<u8>) -> Incoming {
+        Incoming { message: HostMessage::Open { name: name.into() }, bytes: Some(bytes), refused: None }
     }
 
     fn selections(events: &[ViewerMessage]) -> Vec<&ViewerMessage> {
@@ -401,24 +443,85 @@ mod tests {
     #[test]
     fn open_replaces_the_drawing_and_reports_it() {
         let (mut app, mut glue) = sample_app();
-        let dxf = app.run("document.bytes", json!({"name": "plan.dxf"})).ok();
-        // A drawing the app wrote itself is the simplest valid DXF to open.
-        let Some(bytes) = dxf.and_then(|v| v["data"].as_str().map(str::to_string)).and_then(|d| cadcraft_engine::cmd::file::base64_decode(&d)) else {
-            panic!("the sample drawing could not be written as DXF");
-        };
-        let replies = glue.apply(&mut app, Incoming { message: HostMessage::Open { name: "plan.dxf".into() }, bytes: Some(bytes) });
+        let bytes = sample_dxf(&mut app);
+        let replies = glue.apply(&mut app, open("plan.dxf", bytes));
         assert!(matches!(&replies[..], [ViewerMessage::Opened { name, extents: Some(_), layers, .. }] if name == "plan.dxf" && !layers.is_empty()));
         assert_eq!(app.session.docs.len(), 1);
     }
 
     #[test]
-    fn a_file_that_is_not_a_drawing_is_an_error_and_the_viewer_stays_usable() {
+    fn two_opens_in_a_row_report_each_drawing_and_keep_the_last() {
         let (mut app, mut glue) = sample_app();
-        let replies =
-            glue.apply(&mut app, Incoming { message: HostMessage::Open { name: "notes.dxf".into() }, bytes: Some(b"not a drawing".to_vec()) });
-        assert!(matches!(&replies[..], [ViewerMessage::Error { fatal: false, message }] if !message.is_empty()));
-        let missing = glue.apply(&mut app, Incoming { message: HostMessage::Open { name: "plan.dxf".into() }, bytes: None });
-        assert!(matches!(&missing[..], [ViewerMessage::Error { fatal: false, .. }]));
-        assert!(glue.apply(&mut app, message(HostMessage::ZoomExtents)).is_empty());
+        let bytes = sample_dxf(&mut app);
+        let first = glue.apply(&mut app, open("a.dxf", bytes.clone()));
+        let second = glue.apply(&mut app, open("b.dxf", bytes));
+        assert!(matches!(&first[..], [ViewerMessage::Opened { name, .. }] if name == "a.dxf"));
+        assert!(matches!(&second[..], [ViewerMessage::Opened { name, .. }] if name == "b.dxf"));
+        assert_eq!(app.session.docs.len(), 1);
+        assert_eq!(app.session.state().expect("a drawing is open").title, "b.dxf");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_opened_is_an_error_and_the_open_drawing_stays() {
+        let (mut app, mut glue) = sample_app();
+        let title = app.session.state().expect("the sample is open").title.clone();
+        let documents = app.session.docs.len();
+        for refused in [
+            open("notes.dxf", b"not a drawing".to_vec()),
+            Incoming { message: HostMessage::Open { name: "plan.dxf".into() }, bytes: None, refused: None },
+            Incoming { message: HostMessage::Open { name: "huge.dxf".into() }, bytes: None, refused: Some("huge.dxf is too large".into()) },
+        ] {
+            let replies = glue.apply(&mut app, refused);
+            assert!(matches!(&replies[..], [ViewerMessage::Error { fatal: false, message }] if !message.is_empty()));
+            assert_eq!(app.session.docs.len(), documents);
+            assert_eq!(app.session.state().expect("still open").title, title);
+        }
+        let too_large = glue.apply(
+            &mut app,
+            Incoming { message: HostMessage::Open { name: "huge.dxf".into() }, bytes: None, refused: Some("huge.dxf is too large".into()) },
+        );
+        assert_eq!(too_large, vec![ViewerMessage::Error { message: "huge.dxf is too large".into(), fatal: false }]);
+    }
+
+    #[test]
+    fn a_zoom_the_host_sends_after_open_is_not_replaced_by_zoom_extents() {
+        let (mut app, mut glue) = sample_app();
+        let bytes = sample_dxf(&mut app);
+        glue.apply(&mut app, open("plan.dxf", bytes));
+        glue.apply(&mut app, message(HostMessage::ZoomBy { factor: 2.0 }));
+        assert!(!app.canvas.zoom_pending);
+    }
+
+    #[test]
+    fn the_select_pointer_keeps_the_selection() {
+        let (mut app, mut glue) = sample_app();
+        let first = handles_of(&mut app).into_iter().next().expect("the sample has entities");
+        glue.apply(&mut app, message(HostMessage::Select { handles: vec![first] }));
+        let done = glue.apply(&mut app, message(HostMessage::Command { id: EmbedCommand::Select, request_id: "s".into() }));
+        assert!(matches!(&done[..], [ViewerMessage::CommandDone { ok: true, .. }]));
+        assert_eq!(app.session.selection().len(), 1);
+    }
+
+    #[test]
+    fn tool_state_follows_grouping_without_a_selection_change() {
+        let (mut app, mut glue) = sample_app();
+        let two: Vec<String> = handles_of(&mut app).into_iter().take(2).collect();
+        glue.apply(&mut app, message(HostMessage::Select { handles: two.clone() }));
+        assert!(glue.events(&app).iter().any(|e| matches!(e, ViewerMessage::State(state) if state.can_group && !state.can_ungroup)));
+        // Grouping through the engine leaves the selection as it is: only the drawing changed.
+        app.run("group", json!({"handles": two})).expect("group");
+        let events = glue.events(&app);
+        assert!(events.iter().any(|e| matches!(e, ViewerMessage::State(state) if state.can_ungroup)), "{events:?}");
+        // Nothing changed since: nothing is reported again.
+        assert!(glue.events(&app).is_empty());
+    }
+
+    #[test]
+    fn theme_sets_mode_and_canvas_colours() {
+        let (mut app, mut glue) = sample_app();
+        glue.apply(&mut app, message(HostMessage::Theme { dark: false, background: Some([255, 255, 255]), selection: None }));
+        assert_eq!(app.ui.theme, cadcraft_ui_egui::theme::ThemePref::Light);
+        assert_eq!(app.options.model_background, Some(egui::Color32::from_rgb(255, 255, 255)));
+        assert_eq!(app.options.selection_color, None);
     }
 }

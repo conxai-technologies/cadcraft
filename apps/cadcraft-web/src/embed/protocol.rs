@@ -170,11 +170,32 @@ pub struct ToolState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerMessage {
-    Ready { version: String },
-    Opened { name: String, extents: Option<Bounds>, units: String, layers: Vec<LayerInfo> },
-    Error { message: String, fatal: bool },
-    Selection { handles: Vec<String>, bounds: Option<Bounds>, from_host: bool },
-    CommandDone { request_id: String, ok: bool, handles: Vec<String>, error: Option<String> },
+    Ready {
+        version: String,
+    },
+    /// `saved_view`: the drawing opened on the view it was saved with, not fitted to the window.
+    Opened {
+        name: String,
+        extents: Option<Bounds>,
+        units: String,
+        layers: Vec<LayerInfo>,
+        saved_view: bool,
+    },
+    Error {
+        message: String,
+        fatal: bool,
+    },
+    Selection {
+        handles: Vec<String>,
+        bounds: Option<Bounds>,
+        from_host: bool,
+    },
+    CommandDone {
+        request_id: String,
+        ok: bool,
+        handles: Vec<String>,
+        error: Option<String>,
+    },
     State(ToolState),
 }
 
@@ -183,7 +204,8 @@ impl ViewerMessage {
     pub fn to_json(&self) -> Value {
         match self {
             Self::Ready { version } => json!({"type": "cadcraft.ready", "version": version, "capabilities": CAPABILITIES}),
-            Self::Opened { name, extents, units, layers } => json!({
+            Self::Opened { name, extents, units, layers, saved_view } => json!({
+                "savedView": saved_view,
                 "type": "cadcraft.opened",
                 "name": name,
                 "extents": extents,
@@ -312,10 +334,11 @@ mod tests {
                 name: "plan.dxf".into(),
                 extents: None,
                 units: "mm".into(),
-                layers: vec![LayerInfo { name: "0".into(), on: true }]
+                layers: vec![LayerInfo { name: "0".into(), on: true }],
+                saved_view: true
             }
             .to_json(),
-            json!({"type":"cadcraft.opened","name":"plan.dxf","extents":null,"units":"mm","layers":[{"name":"0","on":true}]})
+            json!({"type":"cadcraft.opened","name":"plan.dxf","extents":null,"units":"mm","layers":[{"name":"0","on":true}],"savedView":true})
         );
     }
 }

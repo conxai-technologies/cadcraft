@@ -55,7 +55,11 @@ mod web {
         fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
             // Background reads are consume-based and run on hidden ticks too. Dropped files are
             // input and are read from `ui` only.
-            self.1.drain(&mut self.0);
+            // Embedded, only the host page opens drawings: a picked or dropped file would open
+            // beside the host's drawing, unseen and unreported.
+            if self.5.is_none() {
+                self.1.drain(&mut self.0);
+            }
             self.0.system_animations = self.3.as_ref().map(|reduced| !reduced.matches());
             if let Some(embed) = &mut self.5 {
                 // The host page's bar carries the tools; a shortcut may have switched a part of
@@ -105,7 +109,7 @@ mod web {
         /// On the first pass consume files dropped on the page, then delegate drawing to `CadApp::ui`.
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
             let first_pass = ui.ctx().current_pass_index() == 0;
-            if first_pass {
+            if first_pass && self.5.is_none() {
                 // `take_dropped` consumes the raw list; a second pass or hidden tick cannot
                 // re-read the same file.
                 self.1.take_dropped(ui.ctx());
@@ -177,8 +181,9 @@ mod web {
                 bridge.install();
                 cadcraft_engine::cmd::file::set_deliver(crate::host::deliver);
             }
-            // The upload is the ground truth: what the viewer would save or export goes nowhere.
-            None if embedded => cadcraft_engine::cmd::file::set_deliver(|_, _, _| Ok(())),
+            // The upload is the ground truth: nothing the viewer would save or export is kept, and
+            // it says so rather than reporting a save that did not happen.
+            None if embedded => cadcraft_engine::cmd::file::set_deliver(|_, _, _| Err("Saving is not available in this viewer".to_string())),
             None => cadcraft_engine::cmd::file::set_deliver(crate::download::download),
         }
         let app_bridge = bridge.clone();
@@ -234,10 +239,12 @@ mod web {
                         // chosen file in the background (`upload.rs`), so the picker returns none.
                         let inbox = crate::upload::Inbox::new(&cc.egui_ctx);
                         let picker = inbox.clone();
-                        app.services.pick_open = Some(Box::new(move || {
-                            picker.pick();
-                            None
-                        }));
+                        if !embedded {
+                            app.services.pick_open = Some(Box::new(move || {
+                                picker.pick();
+                                None
+                            }));
+                        }
                         let host = app_bridge.inspect(|bridge| {
                             bridge.listen(inbox.clone());
                             bridge.post_ready();

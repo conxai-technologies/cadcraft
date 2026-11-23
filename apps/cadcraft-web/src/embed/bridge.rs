@@ -99,13 +99,26 @@ impl Inner {
             // The drawing can be large: read its name and bytes directly, never through JSON.
             let name = field("name")?.as_string()?;
             let message = parse_host_message(&serde_json::json!({"type": kind, "name": name}))?;
-            let bytes = bytes_of(&field("bytes")?)?;
-            return Some(Incoming { message, bytes: Some(bytes) });
+            // A drawing too large to open is refused by its length, before it is copied into the
+            // app's memory: a failed allocation aborts the viewer. A missing or unreadable
+            // `bytes` still reaches the app, which answers with an error.
+            let data = field("bytes");
+            let refused = data.as_ref().and_then(byte_length).and_then(|len| cadcraft_ui_egui::CadApp::open_size_error(&name, len));
+            let bytes = if refused.is_some() { None } else { data.as_ref().and_then(bytes_of) };
+            return Some(Incoming { message, bytes, refused });
         }
         let text = js_sys::JSON::stringify(&data).ok()?.as_string()?;
         let message = parse_host_message(&serde_json::from_str(&text).ok()?)?;
-        Some(Incoming { message, bytes: None })
+        Some(Incoming { message, bytes: None, refused: None })
     }
+}
+
+/// The length of an `ArrayBuffer` or a `Uint8Array`, without copying it.
+fn byte_length(value: &wasm_bindgen::JsValue) -> Option<u64> {
+    if let Some(array) = value.dyn_ref::<js_sys::Uint8Array>() {
+        return Some(u64::from(array.byte_length()));
+    }
+    value.dyn_ref::<js_sys::ArrayBuffer>().map(|buffer| u64::from(buffer.byte_length()))
 }
 
 /// The bytes of an `ArrayBuffer` or a `Uint8Array`.
