@@ -7,7 +7,10 @@ use serde_json::{Value, json};
 pub type Bounds = [f64; 4];
 
 /// The capabilities `cadcraft.ready` advertises.
-pub const CAPABILITIES: [&str; 7] = ["open", "zoom", "select", "selection", "command", "panel", "theme"];
+pub const CAPABILITIES: [&str; 8] = ["open", "zoom", "select", "selection", "command", "panel", "theme", "highlight"];
+
+/// The most boxes one `cadcraft.highlight` may carry; a longer list rejects the message.
+pub const MAX_HIGHLIGHTS: usize = 2000;
 
 /// True when the page query has the whole parameter `embed=1`.
 pub fn embed_requested(query: &str) -> bool {
@@ -28,6 +31,14 @@ pub enum EmbedCommand {
     Ungroup,
     Pan,
     Select,
+}
+
+/// One box `cadcraft.highlight` paints over the drawing; `color` is `#rrggbb` (the viewer's
+/// accent when absent).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HighlightBox {
+    pub bounds: Bounds,
+    pub color: Option<[u8; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +73,11 @@ pub enum HostMessage {
     Panel {
         name: PanelName,
         open: bool,
+    },
+    /// Replaces the highlighted boxes (`[]` clears them); `zoom` also fits the view to them.
+    Highlight {
+        boxes: Vec<HighlightBox>,
+        zoom: bool,
     },
 }
 
@@ -107,6 +123,16 @@ fn optional_colour(data: &Value, key: &str) -> Option<Option<[u8; 3]>> {
     }
 }
 
+/// The boxes of a `cadcraft.highlight`: at most [`MAX_HIGHLIGHTS`], each with valid bounds and,
+/// if it has one, a valid colour. One bad box rejects the list.
+fn highlight_boxes(v: &Value) -> Option<Vec<HighlightBox>> {
+    let list = v.as_array()?;
+    if list.len() > MAX_HIGHLIGHTS {
+        return None;
+    }
+    list.iter().map(|b| Some(HighlightBox { bounds: bounds(b.get("bounds")?)?, color: optional_colour(b, "color")? })).collect()
+}
+
 /// Reads one message from the host page. `None` for anything that is not a well-formed embed
 /// message: such messages are dropped without a reply.
 pub fn parse_host_message(data: &Value) -> Option<HostMessage> {
@@ -148,6 +174,13 @@ pub fn parse_host_message(data: &Value) -> Option<HostMessage> {
             };
             HostMessage::Panel { name, open: data.get("open")?.as_bool()? }
         }
+        "highlight" => HostMessage::Highlight {
+            boxes: highlight_boxes(data.get("boxes")?)?,
+            zoom: match data.get("zoom") {
+                None | Some(Value::Null) => false,
+                Some(z) => z.as_bool()?,
+            },
+        },
         _ => return None,
     })
 }
@@ -279,6 +312,26 @@ mod tests {
             parse_host_message(&json!({"type":"cadcraft.theme","mode":"dark","background":"#101418"})),
             Some(HostMessage::Theme { dark: true, background: Some([0x10, 0x14, 0x18]), selection: None })
         );
+        assert_eq!(
+            parse_host_message(
+                &json!({"type":"cadcraft.highlight","boxes":[{"bounds":[3,4,1,2],"color":"#ff0000"},{"bounds":[0,0,0,0]}],"zoom":true})
+            ),
+            Some(HostMessage::Highlight {
+                boxes: vec![
+                    HighlightBox { bounds: [1.0, 2.0, 3.0, 4.0], color: Some([255, 0, 0]) },
+                    HighlightBox { bounds: [0.0, 0.0, 0.0, 0.0], color: None }
+                ],
+                zoom: true
+            })
+        );
+        assert_eq!(parse_host_message(&json!({"type":"cadcraft.highlight","boxes":[]})), Some(HostMessage::Highlight { boxes: vec![], zoom: false }));
+    }
+
+    #[test]
+    fn highlight_takes_at_most_the_limit() {
+        let boxes = |n: usize| json!({"type":"cadcraft.highlight","boxes": vec![json!({"bounds":[0,0,1,1]}); n]});
+        assert!(matches!(parse_host_message(&boxes(MAX_HIGHLIGHTS)), Some(HostMessage::Highlight { boxes, .. }) if boxes.len() == MAX_HIGHLIGHTS));
+        assert_eq!(parse_host_message(&boxes(MAX_HIGHLIGHTS + 1)), None);
     }
 
     #[test]
@@ -302,6 +355,12 @@ mod tests {
             json!({"type":"cadcraft.panel","name":"files","open":true}),
             json!({"type":"cadcraft.theme","mode":"sepia"}),
             json!({"type":"cadcraft.unknown"}),
+            json!({"type":"cadcraft.highlight"}),
+            json!({"type":"cadcraft.highlight","boxes":{}}),
+            json!({"type":"cadcraft.highlight","boxes":[{"color":"#ff0000"}]}),
+            json!({"type":"cadcraft.highlight","boxes":[{"bounds":[0,0,1]}]}),
+            json!({"type":"cadcraft.highlight","boxes":[{"bounds":[0,0,1,1],"color":"red"}]}),
+            json!({"type":"cadcraft.highlight","boxes":[],"zoom":"yes"}),
         ] {
             assert_eq!(parse_host_message(&bad), None, "{bad}");
         }
@@ -312,6 +371,11 @@ mod tests {
         assert_eq!(
             ViewerMessage::Ready { version: "0.20.1".into() }.to_json(),
             json!({"type":"cadcraft.ready","version":"0.20.1","capabilities":CAPABILITIES})
+        );
+        // Appended, never reordered: a host may check for one by name.
+        assert_eq!(
+            ViewerMessage::Ready { version: "0.20.1".into() }.to_json()["capabilities"],
+            json!(["open", "zoom", "select", "selection", "command", "panel", "theme", "highlight"])
         );
         assert_eq!(
             ViewerMessage::Selection { handles: vec!["1B7".into()], bounds: Some([0.0, 0.0, 2.0, 1.0]), from_host: false }.to_json(),

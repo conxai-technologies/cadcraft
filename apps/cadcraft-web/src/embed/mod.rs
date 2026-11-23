@@ -4,6 +4,8 @@
 #[cfg(target_arch = "wasm32")]
 pub mod bridge;
 pub mod glue;
+pub mod overlay;
+pub mod policy;
 pub mod protocol;
 
 /// One message from the host page; `bytes` is the drawing of a `cadcraft.open`. `refused` says

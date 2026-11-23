@@ -7,7 +7,8 @@ use cadcraft_ui_egui::{CadApp, UiState};
 use serde_json::{Value, json};
 
 use super::Incoming;
-use super::protocol::{Bounds, EmbedCommand, HostMessage, LayerInfo, PanelName, ToolState, ViewerMessage, ZoomTarget};
+use super::policy::{self, HostFlag};
+use super::protocol::{Bounds, EmbedCommand, HighlightBox, HostMessage, LayerInfo, PanelName, ToolState, ViewerMessage, ZoomTarget};
 
 /// The engine command a host message runs, with its parameters. `None` for the messages that are
 /// not engine commands (open, theme, panels, pointer modes).
@@ -25,7 +26,8 @@ pub fn command_for(message: &HostMessage) -> Option<(&'static str, Value)> {
         HostMessage::Command { id: EmbedCommand::Pan | EmbedCommand::Select, .. }
         | HostMessage::Open { .. }
         | HostMessage::Theme { .. }
-        | HostMessage::Panel { .. } => return None,
+        | HostMessage::Panel { .. }
+        | HostMessage::Highlight { .. } => return None,
     })
 }
 
@@ -37,6 +39,7 @@ pub fn restrict_ui(ui: &mut UiState) {
     ui.show_file_tabs = false;
     ui.show_command_line = false;
     ui.show_toolsets = false;
+    ui.show_toolsets_strip = false;
     ui.show_viewcube = false;
     ui.start_tab = false;
     ui.show_status_bar = true;
@@ -122,6 +125,10 @@ pub struct Glue {
     selection_tools: (bool, bool, bool),
     /// The next selection change was asked for by the host page.
     host_selected: bool,
+    /// Set while the host page's call runs: the command policy lets it through (`policy.rs`).
+    host: HostFlag,
+    /// The boxes `cadcraft.highlight` asked for, painted over the drawing (`overlay.rs`).
+    highlight: Vec<HighlightBox>,
 }
 
 impl Glue {
@@ -129,8 +136,11 @@ impl Glue {
         Self::default()
     }
 
-    /// Once, when the app exists: the palettes start closed (the host page opens them).
+    /// Once, when the app exists: installs the command policy (the user only views, selects and
+    /// explores; `policy.rs`), and the palettes start closed (the host page opens them).
     pub fn start(&mut self, app: &mut CadApp) {
+        policy::install(&mut app.session, &self.host);
+        let _host = self.host.scope();
         for name in [PanelName::Layers, PanelName::Properties] {
             self.set_panel(app, name, false);
         }
@@ -178,12 +188,15 @@ impl Glue {
         // The new drawing starts with nothing selected; the host learns that from `opened`.
         self.selection = Some(Vec::new());
         self.host_selected = false;
+        self.highlight.clear();
         vec![opened(app, name, saved_view)]
     }
 
     /// Does what one host message asks. The replies are the messages that answer it directly
     /// (an error, a command's result, `opened`); changes it causes are reported by [`Self::events`].
     pub fn apply(&mut self, app: &mut CadApp, incoming: Incoming) -> Vec<ViewerMessage> {
+        // Everything below is the host page's doing: the policy lets it run (opening, closing).
+        let _host = self.host.scope();
         let Incoming { message, bytes, refused } = incoming;
         match &message {
             HostMessage::Open { name } => return self.open(app, name, bytes, refused),
@@ -196,6 +209,20 @@ impl Glue {
             }
             HostMessage::Panel { name, open } => {
                 self.set_panel(app, *name, *open);
+                return Vec::new();
+            }
+            HostMessage::Highlight { boxes, zoom } => {
+                self.highlight.clone_from(boxes);
+                let extents = app.session.state().ok().and_then(|s| finite(&s.doc.extents(&s.space)));
+                if *zoom && let Some(window) = super::overlay::zoom_window(boxes, extents) {
+                    // As `cadcraft.zoomTo` with bounds, and it too wins over a pending fit.
+                    app.canvas.zoom_pending = false;
+                    if let Some((id, params)) = command_for(&HostMessage::ZoomTo(ZoomTarget::Bounds(window)))
+                        && let Err(e) = app.run(id, params)
+                    {
+                        log::warn!("embed: zooming to the highlight failed: {e}");
+                    }
+                }
                 return Vec::new();
             }
             HostMessage::Command { id: EmbedCommand::Pan, request_id } => {
@@ -258,6 +285,11 @@ impl Glue {
                 Vec::new()
             }
         }
+    }
+
+    /// The boxes to paint over the drawing.
+    pub fn highlights(&self) -> &[HighlightBox] {
+        &self.highlight
     }
 
     /// Called once per frame: the selection and tool state, each reported when it changed.
@@ -337,7 +369,9 @@ mod tests {
     }
 
     /// The sample drawing as DXF bytes: a drawing the app wrote itself is the simplest valid one.
-    fn sample_dxf(app: &mut CadApp) -> Vec<u8> {
+    /// Writing it out is not for the user: the test asks as the host.
+    fn sample_dxf(app: &mut CadApp, glue: &Glue) -> Vec<u8> {
+        let _host = glue.host.scope();
         let written = app.run("document.bytes", json!({"name": "plan.dxf"})).expect("the sample is written as DXF");
         cadcraft_engine::cmd::file::base64_decode(written["data"].as_str().expect("data")).expect("base64")
     }
@@ -372,6 +406,7 @@ mod tests {
         let mut ui = cadcraft_ui_egui::UiState::default();
         restrict_ui(&mut ui);
         assert!(!ui.show_toolbar && !ui.in_window_menu && !ui.show_file_tabs && !ui.show_command_line && !ui.show_toolsets && !ui.start_tab);
+        assert!(!ui.show_toolsets_strip);
         assert!(!ui.show_viewcube);
         assert!(ui.show_status_bar);
     }
@@ -420,8 +455,10 @@ mod tests {
 
         // Turn two entities into a block: the reference that replaces them is what gets exploded.
         let parts: Vec<String> = handles_of(&mut app).into_iter().take(2).collect();
+        let host = glue.host.scope();
         let block = app.run("block", json!({"name": "EMBEDTEST", "base": [0.0, 0.0], "handles": parts})).expect("block");
         let insert = block["insert"].as_str().expect("the block left a reference").to_string();
+        drop(host);
         glue.apply(&mut app, message(HostMessage::Select { handles: vec![insert.clone()] }));
         let events = glue.events(&app);
         assert!(events.iter().any(|e| matches!(e, ViewerMessage::State(state) if state.can_explode)));
@@ -443,7 +480,7 @@ mod tests {
     #[test]
     fn open_replaces_the_drawing_and_reports_it() {
         let (mut app, mut glue) = sample_app();
-        let bytes = sample_dxf(&mut app);
+        let bytes = sample_dxf(&mut app, &glue);
         let replies = glue.apply(&mut app, open("plan.dxf", bytes));
         assert!(matches!(&replies[..], [ViewerMessage::Opened { name, extents: Some(_), layers, .. }] if name == "plan.dxf" && !layers.is_empty()));
         assert_eq!(app.session.docs.len(), 1);
@@ -452,7 +489,7 @@ mod tests {
     #[test]
     fn two_opens_in_a_row_report_each_drawing_and_keep_the_last() {
         let (mut app, mut glue) = sample_app();
-        let bytes = sample_dxf(&mut app);
+        let bytes = sample_dxf(&mut app, &glue);
         let first = glue.apply(&mut app, open("a.dxf", bytes.clone()));
         let second = glue.apply(&mut app, open("b.dxf", bytes));
         assert!(matches!(&first[..], [ViewerMessage::Opened { name, .. }] if name == "a.dxf"));
@@ -486,7 +523,7 @@ mod tests {
     #[test]
     fn a_zoom_the_host_sends_after_open_is_not_replaced_by_zoom_extents() {
         let (mut app, mut glue) = sample_app();
-        let bytes = sample_dxf(&mut app);
+        let bytes = sample_dxf(&mut app, &glue);
         glue.apply(&mut app, open("plan.dxf", bytes));
         glue.apply(&mut app, message(HostMessage::ZoomBy { factor: 2.0 }));
         assert!(!app.canvas.zoom_pending);
@@ -523,5 +560,98 @@ mod tests {
         assert_eq!(app.ui.theme, cadcraft_ui_egui::theme::ThemePref::Light);
         assert_eq!(app.options.model_background, Some(egui::Color32::from_rgb(255, 255, 255)));
         assert_eq!(app.options.selection_color, None);
+    }
+
+    fn entity_count(app: &CadApp) -> usize {
+        app.session.doc().map(cadcraft_doc::Drawing::entity_count).unwrap_or_default()
+    }
+
+    #[test]
+    fn the_user_cannot_draw_or_open_but_the_host_can_open() {
+        let (mut app, mut glue) = sample_app();
+        let bytes = sample_dxf(&mut app, &glue);
+        let (count, documents) = (entity_count(&app), app.session.docs.len());
+        // Typed (the canvas sends keys to the command line), started from a menu or shortcut, or
+        // run with parameters: refused, and the drawing is as it was.
+        let _ = app.cmdline("line 0,0 10,10 ");
+        let _ = app.cmdline("l 0,0 10,10 ");
+        app.start("line");
+        assert!(app.run("line", json!({"points": [[0, 0], [10, 10]]})).is_err());
+        assert!(app.session.running.is_none());
+        assert_eq!(entity_count(&app), count);
+        app.start("open");
+        app.start("ui.open");
+        app.start("ui.sample");
+        app.start("close");
+        let data = cadcraft_engine::cmd::file::base64_encode(&bytes);
+        assert!(app.run("open", json!({"data": data, "name": "mine.dxf"})).is_err());
+        assert_eq!(app.session.docs.len(), documents);
+        // Selecting and zooming are the user's.
+        let first = handles_of(&mut app).into_iter().next().expect("the sample has entities");
+        app.run("select", json!({"handles": [first]})).expect("select");
+        app.run("zoom.extents", json!({})).expect("zoom");
+        // The host page opens drawings.
+        let replies = glue.apply(&mut app, open("plan.dxf", bytes));
+        assert!(matches!(&replies[..], [ViewerMessage::Opened { name, .. }] if name == "plan.dxf"));
+        assert_eq!(app.session.docs.len(), 1);
+    }
+
+    /// The viewer's own interface (status bar, palettes, canvas) runs nothing the policy refuses
+    /// while the user only looks: no refusal every frame, no part of it silently dead.
+    #[test]
+    fn ordinary_frames_run_nothing_the_policy_refuses() {
+        let (mut app, mut glue) = sample_app();
+        restrict_ui(&mut app.ui);
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Layers, open: true }));
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Properties, open: true }));
+        let first = handles_of(&mut app).into_iter().next().expect("the sample has entities");
+        glue.apply(&mut app, message(HostMessage::Select { handles: vec![first] }));
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let raw =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| {
+                app.logic(ui.ctx());
+                restrict_ui(&mut app.ui);
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+            let _ = glue.events(&app);
+        }
+        let refused: Vec<&String> = app.session.log.iter().filter(|l| l.contains("is not available here")).collect();
+        assert!(refused.is_empty(), "{refused:?}");
+    }
+
+    #[test]
+    fn a_failing_host_call_leaves_the_user_restricted() {
+        let (mut app, mut glue) = sample_app();
+        let replies = glue.apply(&mut app, open("notes.dxf", b"not a drawing".to_vec()));
+        assert!(matches!(&replies[..], [ViewerMessage::Error { .. }]));
+        assert!(!glue.host.active());
+        assert!(app.run("line", json!({"points": [[0, 0], [10, 10]]})).is_err());
+        assert!(app.run("open", json!({"data": "", "name": "x.dxf"})).is_err());
+    }
+
+    #[test]
+    fn highlight_is_kept_zoomed_to_and_cleared_by_open() {
+        let (mut app, mut glue) = sample_app();
+        let boxes = vec![HighlightBox { bounds: [10.0, 10.0, 20.0, 10.0], color: None }];
+        let replies = glue.apply(&mut app, message(HostMessage::Highlight { boxes: boxes.clone(), zoom: true }));
+        assert!(replies.is_empty());
+        assert_eq!(glue.highlights(), &boxes[..]);
+        // A line (no height): the view is fitted around it, not collapsed onto it.
+        let view = app.session.state().expect("a drawing").view();
+        assert!(view.height.is_finite() && view.height > 0.0, "{view:?}");
+        assert!((view.center.x - 15.0).abs() < 1e-6 && (view.center.y - 10.0).abs() < 1e-6, "{view:?}");
+        assert!(view.height < 20.0, "fitted to the line: {view:?}");
+        // An empty list clears.
+        glue.apply(&mut app, message(HostMessage::Highlight { boxes: boxes.clone(), zoom: false }));
+        glue.apply(&mut app, message(HostMessage::Highlight { boxes: vec![], zoom: true }));
+        assert!(glue.highlights().is_empty());
+        // Opening a drawing clears them too.
+        glue.apply(&mut app, message(HostMessage::Highlight { boxes, zoom: false }));
+        let bytes = sample_dxf(&mut app, &glue);
+        glue.apply(&mut app, open("plan.dxf", bytes));
+        assert!(glue.highlights().is_empty());
     }
 }

@@ -115,6 +115,10 @@ mod web {
                 self.1.take_dropped(ui.ctx());
             }
             self.0.ui(ui);
+            // The host page's highlight, over the drawing just drawn (below menus and windows).
+            if let Some(embed) = &self.5 {
+                crate::embed::overlay::paint(ui.painter(), &self.0, embed.glue.highlights());
+            }
         }
     }
 

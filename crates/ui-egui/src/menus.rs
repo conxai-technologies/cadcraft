@@ -146,6 +146,11 @@ pub fn is_ui_command(id: &str) -> bool {
 
 /// Run a UI-only command. `None` if `id` isn't one.
 pub fn run_ui_command(app: &mut CadApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    // The host's command policy (`Session::set_command_policy`) covers these commands too.
+    if let Err(e) = app.session.check_command(id, params) {
+        app.session.echo(e.to_string());
+        return Some(Err(e.to_string()));
+    }
     crate::i18n::with_language(app.language(), || run_ui_command_inner(app, id, params))
 }
 

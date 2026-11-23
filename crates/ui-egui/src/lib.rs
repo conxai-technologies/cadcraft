@@ -95,6 +95,9 @@ pub struct UiState {
 
     pub interface_language: i18n::Preference,
     pub show_toolsets: bool,
+    /// The thin strip that brings Tool Sets back while they are hidden. A host showing its own
+    /// tools (an embedded viewer) turns it off.
+    pub show_toolsets_strip: bool,
     pub show_palettes: bool,
     pub show_toolbar: bool,
     pub show_file_tabs: bool,
@@ -193,6 +196,7 @@ impl Default for UiState {
 
             interface_language: i18n::Preference::default(),
             show_toolsets: true,
+            show_toolsets_strip: true,
             show_palettes: true,
             show_toolbar: true,
             show_file_tabs: true,
@@ -1092,7 +1096,7 @@ impl CadApp {
             chrome::file_tabs(self, ui);
         }
         let has_doc = !self.session.docs.is_empty() && !self.ui.start_tab;
-        if has_doc && !self.ui.show_toolsets {
+        if has_doc && !self.ui.show_toolsets && self.ui.show_toolsets_strip {
             palettes::toolsets_strip(self, ui);
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.canvas)).show(ui, |ui| {
