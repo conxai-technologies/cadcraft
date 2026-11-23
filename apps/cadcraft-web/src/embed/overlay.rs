@@ -14,12 +14,15 @@ use super::protocol::{Bounds, HighlightBox};
 pub const DEFAULT_COLOUR: [u8; 3] = [0xff, 0x9f, 0x1a];
 /// The smallest a box is drawn (points), so a line (no width) or a point is still seen.
 pub const MIN_SIZE: f32 = 12.0;
+/// Room left around the geometry on every side (points), so the outline frames it instead of
+/// sitting on it.
+pub const PADDING: f32 = 8.0;
 const OUTLINE: f32 = 2.0;
 /// The fill's opacity: faint, so the drawing under it stays readable.
 const FILL_ALPHA: u8 = 40;
 
 /// Where a world box appears on screen: the box around its four corners (a twisted view turns
-/// it), grown about its centre to at least [`MIN_SIZE`] and cut to just beyond `clip` (so a box
+/// it), with [`PADDING`] of room around it, at least [`MIN_SIZE`] in each direction and cut to just beyond `clip` (so a box
 /// larger than the view is not drawn with coordinates past `f32`). `None` when it is entirely
 /// outside `clip` or not finite.
 pub fn screen_rect(xf: &Xf, bounds: Bounds, clip: Rect) -> Option<Rect> {
@@ -28,7 +31,7 @@ pub fn screen_rect(xf: &Xf, bounds: Bounds, clip: Rect) -> Option<Rect> {
     if corners.iter().any(|p| p.x.is_nan() || p.y.is_nan()) {
         return None;
     }
-    let mut rect = Rect::from_points(&corners);
+    let mut rect = Rect::from_points(&corners).expand(PADDING);
     if rect.width() < MIN_SIZE || rect.height() < MIN_SIZE {
         let centre = rect.center();
         let size = vec2(rect.width().max(MIN_SIZE), rect.height().max(MIN_SIZE));
@@ -97,17 +100,18 @@ mod tests {
         let xf = xf(0.0);
         // Centre at (300, 150); x right, y up.
         let r = screen_rect(&xf, [0.0, 0.0, 20.0, 10.0], xf.rect).expect("on screen");
-        assert_eq!(r, Rect::from_min_max(at(300.0, 130.0), at(340.0, 150.0)));
+        // 8 points of room on every side, so the outline does not sit on the geometry.
+        assert_eq!(r, Rect::from_min_max(at(292.0, 122.0), at(348.0, 158.0)));
     }
 
     #[test]
     fn a_line_and_a_point_are_drawn_at_the_minimum_size() {
         let xf = xf(0.0);
         let line = screen_rect(&xf, [0.0, 0.0, 20.0, 0.0], xf.rect).expect("on screen");
-        assert_eq!((line.width(), line.height()), (40.0, MIN_SIZE));
+        assert_eq!((line.width(), line.height()), (40.0 + 2.0 * PADDING, 2.0 * PADDING));
         assert_eq!(line.center(), at(320.0, 150.0));
         let point = screen_rect(&xf, [5.0, 5.0, 5.0, 5.0], xf.rect).expect("on screen");
-        assert_eq!((point.width(), point.height()), (MIN_SIZE, MIN_SIZE));
+        assert_eq!((point.width(), point.height()), (2.0 * PADDING, 2.0 * PADDING));
         assert_eq!(point.center(), at(310.0, 140.0));
     }
 
@@ -125,9 +129,10 @@ mod tests {
     #[test]
     fn a_twisted_view_takes_the_box_around_the_turned_corners() {
         let xf = xf(std::f64::consts::FRAC_PI_2);
-        // Turned a quarter: the 20 x 10 box stands 20 points wide and 40 high.
+        // Turned a quarter: the 20 x 10 box stands 20 points wide and 40 high, plus the padding.
         let r = screen_rect(&xf, [0.0, 0.0, 20.0, 10.0], xf.rect).expect("on screen");
-        assert!((r.width() - 20.0).abs() < 1e-3 && (r.height() - 40.0).abs() < 1e-3, "{r:?}");
+        let (width, height) = (r.width() - 2.0 * PADDING, r.height() - 2.0 * PADDING);
+        assert!((width - 20.0).abs() < 1e-3 && (height - 40.0).abs() < 1e-3, "{r:?}");
     }
 
     #[test]
