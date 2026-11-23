@@ -6,4 +6,11 @@
 
 #[cfg(target_arch = "wasm32")]
 pub mod bridge;
+pub mod glue;
 pub mod protocol;
+
+/// One message from the host page; `bytes` is the drawing of a `cadcraft.open`.
+pub struct Incoming {
+    pub message: protocol::HostMessage,
+    pub bytes: Option<Vec<u8>>,
+}

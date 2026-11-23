@@ -7,13 +7,8 @@ use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::prelude::Closure;
 
-use super::protocol::{HostMessage, ViewerMessage, parse_host_message};
-
-/// One message from the host page; `bytes` is the drawing of a `cadcraft.open`.
-pub struct Incoming {
-    pub message: HostMessage,
-    pub bytes: Option<Vec<u8>>,
-}
+use super::Incoming;
+use super::protocol::{ViewerMessage, parse_host_message};
 
 struct Inner {
     parent: web_sys::Window,
