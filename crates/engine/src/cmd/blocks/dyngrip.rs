@@ -177,6 +177,7 @@ impl Session {
     /// UI's click on a dynamic grip). A list grip (visibility, lookup) has no drag: the UI offers
     /// its choices and sets them with `blocks.reference.set`.
     pub fn start_dyn_grip(&mut self, handle: Handle, node: i32, part: GripPart) -> Result<()> {
+        self.check_command("grip", &Value::Null)?;
         if self.running.is_some() {
             self.cancel();
         }

@@ -12,6 +12,7 @@ mod execute;
 mod files;
 mod interactive;
 mod picking;
+mod policy;
 mod zoom;
 
 pub(crate) use picking::group_10;

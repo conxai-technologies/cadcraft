@@ -1,0 +1,116 @@
+# DocNostic fork only: this file is never offered upstream.
+#
+# Upstream CADCraft's workflows call the shared ones in storytold/craft-common-actions and a
+# feature must not change CI (AGENTS.md, "CI workflows"). This one belongs to the `docnostic`
+# branch alone (DOCNOSTIC.md, "Releasing"): pushing a tag `docnostic-v*` builds the web app the
+# way upstream's release packages it (packaging/web/package.sh: trunk build --release, wasm-opt
+# from index.html's `data-wasm-opt`, the same zip layout) and publishes
+# `cadcraft-web-<tag>.zip` and `SHA256SUMS.txt` as the GitHub release of that tag.
+#
+# The toolchain, trunk version and checksum, and action pins follow upstream's shared release
+# workflow (craft-common-actions .github/workflows/release.yml, job `web`, and its
+# actions/install-trunk); update them together when rebasing onto a newer upstream release.
+
+name: DocNostic web release
+
+on:
+  push:
+    tags: ["docnostic-v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docnostic-web-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  web:
+    name: Web viewer (wasm)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      # Creates the release and uploads its files.
+      contents: write
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      RUST_BACKTRACE: 1
+      TAG: ${{ github.ref_name }}
+      # As craft-common-actions/actions/install-trunk (its default version and pinned checksum).
+      TRUNK_VERSION: "0.21.14"
+      TRUNK_SHA256: "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag
+        # The tag names the zip and its folder: one safe path component.
+        run: |
+          if [[ ! "$TAG" =~ ^docnostic-v[0-9A-Za-z][0-9A-Za-z.+-]*$ ]]; then
+            echo "::error::tag '$TAG' is not docnostic-v<version>"
+            exit 1
+          fi
+
+      # The organisation runs only GitHub's own and verified actions, so the toolchain comes from
+      # the runner's rustup and nothing is cached: a release is rare. No rust-toolchain.toml in
+      # the repository, so stable, as upstream's release picks.
+      - name: Install the Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install stable --profile minimal --target wasm32-unknown-unknown
+          rustup default stable
+
+      - name: Install trunk
+        run: |
+          set -euo pipefail
+          url="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          curl --proto '=https' --proto-redir =https -fsSL -o "$RUNNER_TEMP/trunk.tar.gz" "$url"
+          echo "$TRUNK_SHA256  $RUNNER_TEMP/trunk.tar.gz" | sha256sum -c -
+          tar -xz -C "$HOME/.cargo/bin" -f "$RUNNER_TEMP/trunk.tar.gz" trunk
+          trunk --version
+
+      - name: Build and zip
+        # package.sh names the zip and its top-level folder cadcraft-web-$CADCRAFT_VERSION. trunk
+        # fetches the wasm-bindgen CLI matching Cargo.lock and wasm-opt itself. The app keeps
+        # reporting its Cargo version; only the package carries the tag.
+        env:
+          CADCRAFT_VERSION: ${{ github.ref_name }}
+        run: packaging/web/package.sh
+
+      - name: Check the zip
+        run: |
+          set -euo pipefail
+          zip="dist/release/cadcraft-web-$TAG.zip"
+          listing="$(unzip -Z1 "$zip")"
+          echo "$listing"
+          top="cadcraft-web-$TAG/"
+          if grep -qv "^$top" <<<"$listing"; then echo "::error::entries outside $top"; exit 1; fi
+          for required in index.html LICENSE-MIT LICENSE-APACHE; do
+            grep -qx "$top$required" <<<"$listing" || { echo "::error::$required missing"; exit 1; }
+          done
+          grep -Eq "^${top}cadcraft-web-[0-9a-f]+_bg\.wasm$" <<<"$listing" || { echo "::error::no hashed _bg.wasm"; exit 1; }
+          grep -Eq "^${top}cadcraft-web-[0-9a-f]+\.js$" <<<"$listing" || { echo "::error::no hashed .js"; exit 1; }
+          # The test host pages carry JavaScript and are not shipped.
+          if grep -q "^${top}harness/" <<<"$listing"; then echo "::error::harness/ is in the zip"; exit 1; fi
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist/release
+          sha256sum "cadcraft-web-$TAG.zip" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            "dist/release/cadcraft-web-$TAG.zip" \
+            dist/release/SHA256SUMS.txt \
+            --verify-tag \
+            --title "$TAG" \
+            --notes "CADCraft web viewer with the DocNostic embed mode, built from $GITHUB_SHA. See DOCNOSTIC.md."

@@ -261,6 +261,8 @@ impl Session {
         inputs: Vec<Value>,
         label: String,
     ) -> crate::Result<Option<std::result::Result<Value, String>>> {
+        // `entmake`, `entmod` and `entdel` change the drawing without a command.
+        self.check_command("lisp", &serde_json::Value::Null)?;
         if self.lisp.active {
             return Err(crate::EngineError::Other("a LISP routine is already running".into()));
         }

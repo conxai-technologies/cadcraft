@@ -153,7 +153,13 @@ pub struct Session {
     /// ([`Session::input_object`]): a pick at exactly that point picks that object
     /// ([`Session::pick_object`]).
     pick_hint: Option<(Handle, Vec2)>,
+    /// The host's rule for which commands may run ([`Session::set_command_policy`]).
+    command_policy: Option<CommandPolicy>,
 }
+
+/// A host's rule for which commands may run: given a command id and its JSON parameters
+/// (`null` for an interactive start), whether it may run ([`Session::set_command_policy`]).
+pub type CommandPolicy = Box<dyn Fn(&str, &Value) -> bool + Send + Sync>;
 
 impl Default for Session {
     fn default() -> Self {
@@ -207,6 +213,7 @@ impl Session {
             lisp_last: None,
             hatch_picks: None,
             pick_hint: None,
+            command_policy: None,
         }
     }
 

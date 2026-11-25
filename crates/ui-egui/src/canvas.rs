@@ -153,6 +153,11 @@ pub struct CanvasState {
     /// The polar or object snap tracking path(s) the cursor is on.
     pub track: Option<snap::tracking::Track>,
     pan_last: Option<Pos2>,
+    /// The hand pointer: dragging with the primary button pans the view, as the middle button
+    /// always does, and the primary button then picks nothing.
+    pub hand_pan: bool,
+    /// The wheel zooms the other way: rolling it towards the user zooms in.
+    pub wheel_inverted: bool,
     /// True when the latest scroll came from a trackpad (or other precise-scrolling device):
     /// scrolling then pans and pinch zooms. A notched mouse wheel clears it so the wheel zooms.
     scroll_pans: bool,
@@ -315,6 +320,7 @@ fn handle_scroll_zoom(app: &mut CadApp, ui: &mut egui::Ui, nav: &Navigation<'_>,
     }
     let opts = ui.ctx().options(|o| o.input_options);
     let wheel = ui.input(|i| wheel_zoom_points(&i.raw.events, &opts, nav.rect.height()));
+    let wheel = if app.canvas.wheel_inverted { -wheel } else { wheel };
     if inside
         && !app.canvas.scroll_pans
         && wheel != 0.0
@@ -333,13 +339,22 @@ fn handle_scroll_zoom(app: &mut CadApp, ui: &mut egui::Ui, nav: &Navigation<'_>,
     }
 }
 
+/// True when a button that drags the view is in the asked-for state: the middle button always,
+/// the primary button too while the hand pointer is on.
+fn pan_drag(hand: bool, middle: bool, primary: bool) -> bool {
+    middle || (hand && primary)
+}
+
 fn handle_button_navigation(app: &mut CadApp, nav: &Navigation<'_>, inside: bool) {
     let p = nav.pointer;
-    let middle_pressed = nav.response.ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Middle));
+    let hand = app.canvas.hand_pan;
+    let middle_pressed =
+        nav.response.ctx.input(|i| pan_drag(hand, i.pointer.button_pressed(egui::PointerButton::Middle), i.pointer.primary_pressed()));
     let focused = nav.response.ctx.input(|i| i.focused);
+    // A drag stops when the window loses focus (the release may never arrive), but it may start
+    // without it: on the web the press that gives the canvas focus is handled before the focus.
     if p.middle_down
-        && focused
-        && (app.canvas.pan_last.is_some() || (middle_pressed && inside))
+        && ((focused && app.canvas.pan_last.is_some()) || (middle_pressed && inside))
         && let Some(at) = p.hover_pos
     {
         if let Some(last) = app.canvas.pan_last {
@@ -548,8 +563,12 @@ fn paint_pointer_overlay(
     if app.ui.show_command_line {
         crate::cmdline::show(app, ui, full);
     }
+    // The hand pointer shows the system's hand in place of the crosshair.
+    if inside && !on_menu && app.canvas.hand_pan {
+        ui.ctx().set_cursor_icon(if app.canvas.pan_last.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab });
+    }
     // Crosshair cursor.
-    if inside && !on_menu {
+    if inside && !on_menu && !app.canvas.hand_pan {
         // Hide the OS cursor under the drawn crosshair, unless assistive tech needs it (#39).
         ui.ctx().set_cursor_icon(if app.ui.system_cursor { egui::CursorIcon::Crosshair } else { egui::CursorIcon::None });
         if let Some(hp) = hover_pos {
@@ -800,15 +819,18 @@ pub fn show(app: &mut CadApp, ui: &mut egui::Ui) {
     app.canvas.xf = Some(xf);
 
     // ---------- input ----------
+    // With the hand pointer the primary button drags the view like the middle one, so it is
+    // reported as that and never as a click: nothing is picked and no window is opened.
+    let hand = app.canvas.hand_pan;
     let pointer = ui.input(|i| PointerInput {
         hover_pos: i.pointer.hover_pos(),
         scroll: i.smooth_scroll_delta,
         mods: i.modifiers,
-        middle_down: i.pointer.middle_down(),
-        pressed_primary: i.pointer.primary_clicked(),
+        middle_down: pan_drag(hand, i.pointer.middle_down(), i.pointer.primary_down()),
+        pressed_primary: !hand && i.pointer.primary_clicked(),
         pressed_secondary: i.pointer.secondary_clicked(),
         dbl_middle: i.pointer.button_double_clicked(egui::PointerButton::Middle),
-        dbl_primary: i.pointer.button_double_clicked(egui::PointerButton::Primary),
+        dbl_primary: !hand && i.pointer.button_double_clicked(egui::PointerButton::Primary),
     });
     let navigation = Navigation { rect, tiles: &tiles, response: &resp, xf, pointer };
     let Some((inside, on_menu)) = navigate_canvas(app, ui, &navigation) else { return };

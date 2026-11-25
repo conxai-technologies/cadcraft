@@ -1,0 +1,17 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>CADCraft embed harness: another origin</title>
+<p>This page frames the viewer with <code>?embed=1</code> from another origin (<code>localhost</code> and
+<code>127.0.0.1</code> are different origins) and posts <code>cadcraft.zoomBy</code> every second.
+Expected: the normal app (menus, toolbar) and "messages received: none".</p>
+<iframe id="viewer" style="width:100%;height:75vh;border:1px solid #ccc"></iframe>
+<pre id="log">messages received: none</pre>
+<script>
+  const other = location.hostname === 'localhost' ? '127.0.0.1' : 'localhost';
+  const viewer = document.getElementById('viewer');
+  viewer.src = `${location.protocol}//${other}:${location.port}/index.html?embed=1`;
+  addEventListener('message', event => {
+    document.getElementById('log').textContent = `MESSAGE RECEIVED from ${event.origin}: ${JSON.stringify(event.data)}`;
+  });
+  setInterval(() => viewer.contentWindow.postMessage({type: 'cadcraft.zoomBy', factor: 4}, '*'), 1000);
+</script>
