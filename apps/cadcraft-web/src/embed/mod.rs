@@ -5,6 +5,7 @@
 pub mod bridge;
 pub mod glue;
 pub mod overlay;
+pub mod panels;
 pub mod policy;
 pub mod protocol;
 

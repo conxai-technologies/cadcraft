@@ -73,10 +73,6 @@ pub const ALLOWED: &[&str] = &[
     "layiso",
     "layuniso",
     "layer.set",
-    // The palettes the host opens and closes.
-    "ui.dock",
-    "ui.panel.layers",
-    "ui.panel.properties",
 ];
 
 /// The command a typed name stands for, as the engine reads it: `'ZOOM` (transparent), `_PAN` and
@@ -199,11 +195,12 @@ mod tests {
             "layuniso",
             "layon",
             "laythw",
-            "ui.dock",
-            "ui.panel.layers",
-            "ui.panel.properties",
         ] {
             assert!(user_may_run(name, &Value::Null), "{name} is refused");
+        }
+        // The app's own palettes (editing tools, a dock) are not the user's to open.
+        for name in ["ui.dock", "ui.panel.layers", "ui.panel.properties"] {
+            assert!(!user_may_run(name, &Value::Null), "{name} runs");
         }
     }
 

@@ -64,7 +64,6 @@ host-controlled read-only session; PdfCraft has `Session::set_read_only`).
   - layer visibility: `layon`, `layoff`, `layfrz`, `laythw`, `layiso`, `layuniso`, and
     `layer.set` only with `name` and boolean `on` / `frozen` (the Layers palette's bulb and
     snowflake; lock, colour, rename and the rest are refused)
-  - the palettes: `ui.dock`, `ui.panel.layers`, `ui.panel.properties`
 
   Typed names resolve as the engine resolves them (`Z` is `zoom`, `'PAN` and `_PAN` are `pan`,
   `-GROUP` stays `-group` and is refused). The status bar's drafting toggles (grid, snap, ortho,
@@ -81,6 +80,8 @@ host-controlled read-only session; PdfCraft has `Session::set_read_only`).
   after `cadcraft.open` wins over that fit.
 - Messages are taken only from `window.parent` at our own origin, and replies go only there.
   Malformed or unknown messages are dropped without a reply.
+- The wheel zooms the other way round than upstream: rolling it towards the user zooms in
+  (`CanvasState::wheel_inverted`), as DocNostic's reviewers asked.
 - `cadcraft.highlight` boxes are painted over the drawing by the shell after each frame, clipped
   to the drawing area and below menus and floating windows, on the Model tab only (they are
   model-space coordinates). A box smaller than 12 points (a line, a point) is drawn 12 points
@@ -105,8 +106,8 @@ Host page to viewer:
 | `cadcraft.zoomTo` | `bounds` or `handles` | Fit a box or entities. Unknown handles are skipped |
 | `cadcraft.select` | `handles` (`[]` clears) | Set the selection. Unknown handles are skipped |
 | `cadcraft.command` | `id` (`explode`, `group`, `ungroup`, `pan`, `select`), `requestId` | Run on the selection, or switch the pointer: with `pan` the primary button drags the view until `select`. The middle button drags it and the wheel zooms with either pointer |
-| `cadcraft.panel` | `name` (`layers`, `properties`), `open` | Show or hide a palette |
-| `cadcraft.highlight` | `boxes [{bounds, color?}]` (`#rrggbb`, default `#ff9f1a`; at most 2000, more rejects the message; `[]` clears), `zoom?` (bool) | Paint boxes over the drawing; `zoom: true` also fits the view to them with a margin (a line or a point gets one too) |
+| `cadcraft.panel` | `name` (`layers`, `properties`), `open` | Show or hide one of the viewer's own panels (`embed/panels.rs`), in a column right of the drawing. Layers: a list with multi-select (Ctrl/Cmd, Shift) and show, hide, lock, unlock. Properties: the selection's properties, read only. The app's own palettes and dock stay closed and the user cannot open them |
+| `cadcraft.highlight` | `boxes [{bounds, color?, id?}]` (`#rrggbb`, default `#ff9f1a`; at most 2000, more rejects the message; `[]` clears), `zoom?` (bool) | Paint boxes over the drawing; `zoom: true` also fits the view to them with a margin (a line or a point gets one too) |
 
 Viewer to host page:
 
@@ -118,6 +119,7 @@ Viewer to host page:
 | `cadcraft.selection` | `handles`, `bounds`, `count`, `source` (`user`, `host`) | The selection changed |
 | `cadcraft.commandDone` | `requestId`, `ok`, `handles`, `error?` | A `cadcraft.command` finished; explode returns the new handles |
 | `cadcraft.state` | `canExplode`, `canGroup`, `canUngroup`, `panels {layers, properties}` | Tool state changed |
+| `cadcraft.highlightClicked` | `id` | The user clicked inside the highlight box with this `id` (the smallest one under the cursor; boxes without an id are not reported). On empty space the click selects nothing; on an object the object is selected first and `cadcraft.selection` comes before this message |
 
 ## Build and try
 

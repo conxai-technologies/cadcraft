@@ -114,9 +114,17 @@ mod web {
                 // re-read the same file.
                 self.1.take_dropped(ui.ctx());
             }
+            // The viewer's own panels take their room first; the drawing fills the rest.
+            if let Some(embed) = &mut self.5 {
+                embed.glue.show_panels(ui, &mut self.0);
+            }
+            let clicked = ui.input(|i| if i.pointer.primary_clicked() { i.pointer.interact_pos() } else { None });
             self.0.ui(ui);
-            // The host page's highlight, over the drawing just drawn (below menus and windows).
-            if let Some(embed) = &self.5 {
+            if let Some(embed) = &mut self.5 {
+                if let Some(pos) = clicked.filter(|_| first_pass) {
+                    embed.glue.canvas_click(&mut self.0, pos);
+                }
+                // The host page's highlight, over the drawing just drawn (below menus and windows).
                 crate::embed::overlay::paint(ui.painter(), &self.0, embed.glue.highlights());
             }
         }
@@ -258,6 +266,7 @@ mod web {
                             let mut glue = crate::embed::glue::Glue::new();
                             glue.start(&mut app);
                             crate::embed::glue::restrict_ui(&mut app.ui);
+                            app.canvas.wheel_inverted = true;
                             bridge.post(&crate::embed::protocol::ViewerMessage::Ready { version: env!("CARGO_PKG_VERSION").to_string() });
                             Embed { bridge, glue }
                         });

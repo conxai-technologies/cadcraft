@@ -61,6 +61,16 @@ pub fn paint(painter: &egui::Painter, app: &CadApp, boxes: &[HighlightBox]) {
     }
 }
 
+/// The id of the box under `pos` (a screen point): the smallest one drawn there that has an id,
+/// so a box inside a larger one can still be reached.
+pub fn box_at<'a>(xf: &Xf, boxes: &'a [HighlightBox], pos: egui::Pos2) -> Option<&'a str> {
+    boxes
+        .iter()
+        .filter_map(|b| Some((screen_rect(xf, b.bounds, xf.rect).filter(|rect| rect.contains(pos))?.area(), b.id.as_deref()?)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, id)| id)
+}
+
 /// The window `zoom: true` fits: the boxes' union with a margin on each side, so they are not
 /// against the edge. A union without area (one line, one point) still gets a window: its margin
 /// comes from its longer side, else from the drawing's extents, else one drawing unit.
@@ -92,7 +102,7 @@ mod tests {
     }
 
     fn boxed(bounds: Bounds) -> HighlightBox {
-        HighlightBox { bounds, color: None }
+        HighlightBox { bounds, color: None, id: None }
     }
 
     #[test]
@@ -147,9 +157,9 @@ mod tests {
             out.shapes.len()
         };
         let none = shapes(&app, &[]);
-        let red = HighlightBox { bounds: [0.0, 0.0, 1.0, 1.0], color: Some([255, 0, 0]) };
+        let red = HighlightBox { bounds: [0.0, 0.0, 1.0, 1.0], color: Some([255, 0, 0]), id: None };
         // A fill and an outline for the box on screen; nothing for the one off it.
-        assert_eq!(shapes(&app, &[red, boxed([1000.0, 1000.0, 1001.0, 1001.0])]), none + 2);
+        assert_eq!(shapes(&app, &[red.clone(), boxed([1000.0, 1000.0, 1001.0, 1001.0])]), none + 2);
         app.session.execute("layout.set", &serde_json::json!({"name": "Layout1"})).expect("a layout");
         assert_eq!(shapes(&app, &[red]), none);
     }
@@ -161,7 +171,7 @@ mod tests {
         let mut app = CadApp::new(cadcraft_engine::Session::new(), cadcraft_ui_egui::Services::default());
         app.session.execute("line", &serde_json::json!({"points": [[0, 0], [10, 10]]})).expect("line");
         app.canvas.zoom_pending = true;
-        let red = HighlightBox { bounds: [0.0, 0.0, 10.0, 10.0], color: Some([255, 0, 0]) };
+        let red = HighlightBox { bounds: [0.0, 0.0, 10.0, 10.0], color: Some([255, 0, 0]), id: None };
         let ctx = egui::Context::default();
         let mut shapes = Vec::new();
         for _ in 0..2 {
@@ -169,7 +179,7 @@ mod tests {
             let mut out = ctx.run_ui(raw, |ui| {
                 app.logic(ui.ctx());
                 app.ui(ui);
-                paint(ui.painter(), &app, &[red]);
+                paint(ui.painter(), &app, std::slice::from_ref(&red));
             });
             out.textures_delta.clear();
             shapes = out.shapes;

@@ -45,13 +45,6 @@ pub fn restrict_ui(ui: &mut UiState) {
     ui.show_status_bar = true;
 }
 
-fn panel(name: PanelName) -> Panel {
-    match name {
-        PanelName::Layers => Panel::Layers,
-        PanelName::Properties => Panel::Properties,
-    }
-}
-
 /// The handles of `wanted` that name an entity of the open drawing. A stale link (an entity that
 /// was deleted or exploded) is skipped so the rest still apply.
 fn known(app: &CadApp, wanted: &[String]) -> Vec<String> {
@@ -129,6 +122,10 @@ pub struct Glue {
     host: HostFlag,
     /// The boxes `cadcraft.highlight` asked for, painted over the drawing (`overlay.rs`).
     highlight: Vec<HighlightBox>,
+    /// The viewer's own Layers and Properties panels (`panels.rs`).
+    panels: super::panels::Panels,
+    /// Clicks in highlight boxes, reported with the next [`Self::events`].
+    clicked: Vec<ViewerMessage>,
 }
 
 impl Glue {
@@ -141,20 +138,37 @@ impl Glue {
     pub fn start(&mut self, app: &mut CadApp) {
         policy::install(&mut app.session, &self.host);
         let _host = self.host.scope();
-        for name in [PanelName::Layers, PanelName::Properties] {
-            self.set_panel(app, name, false);
+        // The app's own palettes (with their editing tools and dock) stay closed for good: the
+        // host page's Layers and Properties buttons show the viewer's panels (`panels.rs`).
+        for panel in [Panel::Layers, Panel::Properties] {
+            if app.ui.docking.layout.contains(&panel)
+                && let Err(e) = app.run("ui.dock", json!({"operation": "close", "panel": panel.id()}))
+            {
+                log::warn!("embed: could not close the {} palette: {e}", panel.id());
+            }
         }
     }
 
-    fn set_panel(&mut self, app: &mut CadApp, name: PanelName, open: bool) {
-        let panel = panel(name);
-        if app.ui.docking.layout.contains(&panel) == open {
+    /// Draws the open panels beside the drawing; call before the app draws its frame.
+    pub fn show_panels(&mut self, ui: &mut egui::Ui, app: &mut CadApp) {
+        self.panels.show(ui, app, &self.host);
+    }
+
+    /// A primary click at `pos` (screen), after the app handled it. Inside a highlight box that
+    /// has an id it is reported to the host, wherever in the box it lands. On empty space the
+    /// selection window the click opened is closed again; on an object, the object is selected
+    /// as usual and the box is reported after that selection.
+    pub fn canvas_click(&mut self, app: &mut CadApp, pos: egui::Pos2) {
+        let Some(xf) = app.canvas.xf else { return };
+        let model = app.session.state().is_ok_and(|s| s.space == cadcraft_doc::Space::Model);
+        if !model || !xf.rect.contains(pos) {
             return;
         }
-        let operation = if open { "open" } else { "close" };
-        if let Err(e) = app.run("ui.dock", json!({"operation": operation, "panel": panel.id()})) {
-            log::warn!("embed: could not {operation} the {} panel: {e}", panel.id());
+        let Some(id) = super::overlay::box_at(&xf, &self.highlight, pos).map(str::to_string) else { return };
+        if app.session.pending_window.is_some() {
+            app.session.cancel();
         }
+        self.clicked.push(ViewerMessage::HighlightClicked { id });
     }
 
     fn open(&mut self, app: &mut CadApp, name: &str, bytes: Option<Vec<u8>>, refused: Option<String>) -> Vec<ViewerMessage> {
@@ -189,6 +203,8 @@ impl Glue {
         self.selection = Some(Vec::new());
         self.host_selected = false;
         self.highlight.clear();
+        self.clicked.clear();
+        self.panels.reset();
         vec![opened(app, name, saved_view)]
     }
 
@@ -208,7 +224,7 @@ impl Glue {
                 return Vec::new();
             }
             HostMessage::Panel { name, open } => {
-                self.set_panel(app, *name, *open);
+                self.panels.set(*name == PanelName::Layers, *open);
                 return Vec::new();
             }
             HostMessage::Highlight { boxes, zoom } => {
@@ -321,18 +337,21 @@ impl Glue {
             self.selection_tools = selection_tools(app, selection);
             self.examined = examined;
         }
-        let layout = &app.ui.docking.layout;
         let state = ToolState {
             can_explode: self.selection_tools.0,
             can_group: self.selection_tools.1,
             can_ungroup: self.selection_tools.2,
-            layers_open: layout.contains(&Panel::Layers),
-            properties_open: layout.contains(&Panel::Properties),
+            layers_open: self.panels.layers_open,
+            properties_open: self.panels.properties_open,
         };
         if self.state.as_ref() != Some(&state) {
+            // After the selection: a click in a box may have cleared it first.
+            out.append(&mut self.clicked);
             out.push(ViewerMessage::State(state.clone()));
             self.state = Some(state);
         }
+        // After the selection: a click in a box may have cleared it first.
+        out.append(&mut self.clicked);
         out
     }
 }
@@ -557,6 +576,64 @@ mod tests {
     }
 
     #[test]
+    fn a_click_on_empty_space_in_a_highlight_box_is_reported_once() {
+        let (mut app, mut glue) = sample_app();
+        let _ = glue.events(&app);
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 400.0));
+        app.canvas.xf = Some(cadcraft_ui_egui::canvas::Xf { rect, center: cadcraft_geom::Vec2::new(0.0, 0.0), scale: 1.0, twist: 0.0 });
+        app.canvas.hover = None;
+        let boxed = |bounds, id: &str| HighlightBox { bounds, color: None, id: Some(id.to_string()) };
+        let boxes = vec![boxed([-100.0, -100.0, 100.0, 100.0], "outer"), boxed([-10.0, -10.0, 10.0, 10.0], "inner")];
+        glue.apply(&mut app, message(HostMessage::Highlight { boxes, zoom: false }));
+        // The view's centre is the middle of the canvas: inside both boxes, the smaller one wins.
+        glue.canvas_click(&mut app, rect.center());
+        assert!(matches!(&glue.events(&app)[..], [ViewerMessage::HighlightClicked { id }] if id == "inner"));
+        assert!(glue.events(&app).is_empty());
+        glue.canvas_click(&mut app, rect.center() + egui::vec2(60.0, 0.0));
+        assert!(matches!(&glue.events(&app)[..], [ViewerMessage::HighlightClicked { id }] if id == "outer"));
+        // Outside every box, and outside the drawing area: nothing.
+        glue.canvas_click(&mut app, rect.center() + egui::vec2(180.0, 0.0));
+        glue.canvas_click(&mut app, egui::pos2(900.0, 900.0));
+        assert!(glue.events(&app).is_empty());
+    }
+
+    /// One frame of the shell: the viewer's panels, then the app.
+    fn frame(app: &mut CadApp, glue: &mut Glue) {
+        let ctx = egui::Context::default();
+        for _ in 0..2 {
+            let raw =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0, 800.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw, |ui| {
+                app.logic(ui.ctx());
+                glue.show_panels(ui, app);
+                app.ui(ui);
+            });
+            out.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn the_viewers_own_panels_take_room_beside_the_drawing_and_the_palettes_stay_closed() {
+        let (mut app, mut glue) = sample_app();
+        frame(&mut app, &mut glue);
+        let full = app.canvas.rect.expect("the drawing was drawn").width();
+        let first = handles_of(&mut app).into_iter().next().expect("the sample has entities");
+        glue.apply(&mut app, message(HostMessage::Select { handles: vec![first] }));
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Layers, open: true }));
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Properties, open: true }));
+        frame(&mut app, &mut glue);
+        let beside = app.canvas.rect.expect("the drawing was drawn").width();
+        assert!(beside < full - 200.0, "{beside} of {full}");
+        assert!(!app.ui.docking.layout.contains(&Panel::Layers) && !app.ui.docking.layout.contains(&Panel::Properties));
+        // Reading the properties is not an edit and leaves the selection alone.
+        assert_eq!(app.session.selection().len(), 1);
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Layers, open: false }));
+        glue.apply(&mut app, message(HostMessage::Panel { name: PanelName::Properties, open: false }));
+        frame(&mut app, &mut glue);
+        assert_eq!(app.canvas.rect.expect("the drawing was drawn").width(), full);
+    }
+
+    #[test]
     fn tool_state_follows_grouping_without_a_selection_change() {
         let (mut app, mut glue) = sample_app();
         let two: Vec<String> = handles_of(&mut app).into_iter().take(2).collect();
@@ -652,7 +729,7 @@ mod tests {
     #[test]
     fn highlight_is_kept_zoomed_to_and_cleared_by_open() {
         let (mut app, mut glue) = sample_app();
-        let boxes = vec![HighlightBox { bounds: [10.0, 10.0, 20.0, 10.0], color: None }];
+        let boxes = vec![HighlightBox { bounds: [10.0, 10.0, 20.0, 10.0], color: None, id: None }];
         let replies = glue.apply(&mut app, message(HostMessage::Highlight { boxes: boxes.clone(), zoom: true }));
         assert!(replies.is_empty());
         assert_eq!(glue.highlights(), &boxes[..]);

@@ -35,10 +35,25 @@ pub enum EmbedCommand {
 
 /// One box `cadcraft.highlight` paints over the drawing; `color` is `#rrggbb` (the viewer's
 /// accent when absent).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `id` names the box for the host: a click in it is reported as `cadcraft.highlightClicked`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct HighlightBox {
     pub bounds: Bounds,
     pub color: Option<[u8; 3]>,
+    pub id: Option<String>,
+}
+
+/// The longest id a highlight box may carry.
+pub const MAX_HIGHLIGHT_ID: usize = 200;
+
+/// A box's optional `id`: a string of at most [`MAX_HIGHLIGHT_ID`] bytes. `None` when it is
+/// there and anything else.
+fn optional_id(b: &Value) -> Option<Option<String>> {
+    match b.get("id") {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(id)) if id.len() <= MAX_HIGHLIGHT_ID => Some(Some(id.clone())),
+        Some(_) => None,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +145,7 @@ fn highlight_boxes(v: &Value) -> Option<Vec<HighlightBox>> {
     if list.len() > MAX_HIGHLIGHTS {
         return None;
     }
-    list.iter().map(|b| Some(HighlightBox { bounds: bounds(b.get("bounds")?)?, color: optional_colour(b, "color")? })).collect()
+    list.iter().map(|b| Some(HighlightBox { bounds: bounds(b.get("bounds")?)?, color: optional_colour(b, "color")?, id: optional_id(b)? })).collect()
 }
 
 /// Reads one message from the host page. `None` for anything that is not a well-formed embed
@@ -230,6 +245,10 @@ pub enum ViewerMessage {
         error: Option<String>,
     },
     State(ToolState),
+    /// The user clicked inside the highlight box with this id, on no object.
+    HighlightClicked {
+        id: String,
+    },
 }
 
 impl ViewerMessage {
@@ -246,6 +265,7 @@ impl ViewerMessage {
                 "layers": layers.iter().map(|l| json!({"name": l.name, "on": l.on})).collect::<Vec<_>>(),
             }),
             Self::Error { message, fatal } => json!({"type": "cadcraft.error", "message": message, "fatal": fatal}),
+            Self::HighlightClicked { id } => json!({"type": "cadcraft.highlightClicked", "id": id}),
             Self::Selection { handles, bounds, from_host } => json!({
                 "type": "cadcraft.selection",
                 "handles": handles,
@@ -318,8 +338,8 @@ mod tests {
             ),
             Some(HostMessage::Highlight {
                 boxes: vec![
-                    HighlightBox { bounds: [1.0, 2.0, 3.0, 4.0], color: Some([255, 0, 0]) },
-                    HighlightBox { bounds: [0.0, 0.0, 0.0, 0.0], color: None }
+                    HighlightBox { bounds: [1.0, 2.0, 3.0, 4.0], color: Some([255, 0, 0]), id: None },
+                    HighlightBox { bounds: [0.0, 0.0, 0.0, 0.0], color: None, id: None }
                 ],
                 zoom: true
             })

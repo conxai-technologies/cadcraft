@@ -156,6 +156,8 @@ pub struct CanvasState {
     /// The hand pointer: dragging with the primary button pans the view, as the middle button
     /// always does, and the primary button then picks nothing.
     pub hand_pan: bool,
+    /// The wheel zooms the other way: rolling it towards the user zooms in.
+    pub wheel_inverted: bool,
     /// True when the latest scroll came from a trackpad (or other precise-scrolling device):
     /// scrolling then pans and pinch zooms. A notched mouse wheel clears it so the wheel zooms.
     scroll_pans: bool,
@@ -318,6 +320,7 @@ fn handle_scroll_zoom(app: &mut CadApp, ui: &mut egui::Ui, nav: &Navigation<'_>,
     }
     let opts = ui.ctx().options(|o| o.input_options);
     let wheel = ui.input(|i| wheel_zoom_points(&i.raw.events, &opts, nav.rect.height()));
+    let wheel = if app.canvas.wheel_inverted { -wheel } else { wheel };
     if inside
         && !app.canvas.scroll_pans
         && wheel != 0.0
