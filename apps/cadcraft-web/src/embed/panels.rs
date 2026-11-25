@@ -20,6 +20,8 @@ const WIDTH_RANGE: std::ops::RangeInclusive<f32> = 240.0..=640.0;
 /// Above this many selected objects only their number is shown: reading every property of a
 /// whole drawing each time the selection changes would stall the frame.
 const MAX_OBJECTS: usize = 500;
+/// Room between the Properties panel's two columns (points).
+const GRID_GAP: f32 = 12.0;
 /// The value shown for a property the selected objects do not share.
 const VARIES: &str = "Varies";
 
@@ -113,6 +115,10 @@ fn text_of(value: &Value) -> String {
             _ => n.to_string(),
         },
         Value::String(s) => s.clone(),
+        // A list of records (a polyline's vertices) is counted, not spelled out.
+        Value::Array(items) if items.iter().any(|item| item.is_object() || item.is_array()) => {
+            format!("{} {}", items.len(), if items.len() == 1 { "item" } else { "items" })
+        }
         Value::Array(items) => items.iter().map(text_of).collect::<Vec<_>>().join(", "),
         Value::Object(_) => value.to_string(),
     }
@@ -191,8 +197,8 @@ impl Panels {
         let t = Tokens::get();
         let frame = egui::Frame::NONE.fill(t.panel).inner_margin(egui::Margin::same(8));
         egui::Panel::right("embed_panels").default_size(DEFAULT_WIDTH).size_range(WIDTH_RANGE).resizable(true).frame(frame).show(ui, |ui| {
-            // Long layer names and values are scrolled to, never cut or wrapped mid-word.
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            // Long layer names and values wrap onto further lines: nothing runs past the edge.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             let both = self.layers_open && self.properties_open;
             let height = ui.available_height();
             if self.layers_open {
@@ -241,7 +247,7 @@ impl Panels {
         });
         ui.label(RichText::new(format!("{} of {} selected", chosen.len(), names.len())).font(theme::small()).color(t.text_dim));
         ui.add_space(2.0);
-        ScrollArea::both().id_salt("embed-layers").auto_shrink([false, false]).show(ui, |ui| {
+        ScrollArea::vertical().id_salt("embed-layers").auto_shrink([false, false]).show(ui, |ui| {
             for (index, row) in rows.iter().enumerate() {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
@@ -305,8 +311,11 @@ impl Panels {
         ui.label(RichText::new("Properties").font(theme::body()).strong().color(t.text));
         ui.label(RichText::new(&self.properties.title).font(theme::small()).color(t.text_dim));
         ui.add_space(2.0);
-        ScrollArea::both().id_salt("embed-properties").auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("embed-properties-grid").num_columns(2).spacing(vec2(12.0, 4.0)).striped(true).show(ui, |ui| {
+        ScrollArea::vertical().id_salt("embed-properties").auto_shrink([false, false]).show(ui, |ui| {
+            // Two columns that share the panel's width; a longer name or value wraps in its own.
+            let column = ((ui.available_width() - GRID_GAP) / 2.0).max(60.0);
+            let grid = egui::Grid::new("embed-properties-grid").num_columns(2).spacing(vec2(GRID_GAP, 4.0)).striped(true);
+            grid.min_col_width(column).max_col_width(column).show(ui, |ui| {
                 for (label, value) in &self.properties.rows {
                     ui.label(RichText::new(label).font(theme::body()).color(t.text_dim));
                     ui.label(RichText::new(value).font(theme::body()).color(t.text));
@@ -358,6 +367,8 @@ mod tests {
         assert!(rows.contains(&("Start x".to_string(), "33979".to_string())), "{rows:?}");
         assert!(rows.contains(&("Start y".to_string(), "2".to_string())), "{rows:?}");
         assert!(rows.contains(&("Closed".to_string(), "No".to_string())), "{rows:?}");
+        let rows = rows_of(&[json!({"vertices": [{"x": 1.5, "y": 2}, {"x": 3, "y": 4}], "tags": ["a", "b"]})]);
+        assert_eq!(rows, [("Tags".to_string(), "a, b".to_string()), ("Vertices".to_string(), "2 items".to_string())]);
         let rows = rows_of(&[json!({"type": "Line", "annotativeScales": [], "bounds": [0, 0, 1, 1], "note": ""})]);
         assert_eq!(rows, [("Type".to_string(), "Line".to_string())]);
     }
